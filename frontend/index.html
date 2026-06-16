@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MailCull</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body, #root { height: 100%; overflow: hidden; }
+      body {
+        background: #0E0F12;
+        color: #E2E5EA;
+        font-family: 'Hanken Grotesk', system-ui, sans-serif;
+        font-size: 13px;
+        line-height: 1.45;
+        -webkit-font-smoothing: antialiased;
+      }
+      ::selection { background: rgba(43,179,163,.3); }
+      :focus-visible { outline: 2px solid #2BB3A3; outline-offset: 1px; }
+      button { font-family: inherit; }
+      input, select { font-family: inherit; }
+      ::-webkit-scrollbar { width: 9px; height: 9px; }
+      ::-webkit-scrollbar-track { background: #0E0F12; }
+      ::-webkit-scrollbar-thumb { background: #24272E; border: 2px solid #0E0F12; border-radius: 5px; }
+      ::-webkit-scrollbar-thumb:hover { background: #31353D; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      @keyframes pulse { 0%,100% { opacity: .45; } 50% { opacity: 1; } }
+      @keyframes fadeIn { from { transform: translateY(-4px); } to { transform: none; } }
+      @keyframes stripe { from { background-position: 0 0; } to { background-position: 28px 0; } }
+      @keyframes rowIn { from { transform: translateX(-5px); } to { transform: none; } }
+      kbd { font-family: 'JetBrains Mono', monospace; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

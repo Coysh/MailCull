@@ -1,0 +1,50 @@
+services:
+  mailcull:
+    build: .
+    ports:
+      - "127.0.0.1:8420:8420"
+    env_file: .env
+    volumes:
+      - mailcull-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8420/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ── Optional: bundled Ollama service ──────────────────────────────────────
+  # To use: uncomment this block and set OLLAMA_BASE_URL=http://ollama:11434 in .env
+  # Requires: pull a model first — docker compose exec ollama ollama pull llama3.2:3b
+  #
+  # ollama:
+  #   image: ollama/ollama
+  #   ports:
+  #     - "127.0.0.1:11434:11434"
+  #   volumes:
+  #     - ollama-models:/root/.ollama
+  #   restart: unless-stopped
+  #   # GPU support (NVIDIA) — comment out if no GPU:
+  #   # deploy:
+  #   #   resources:
+  #   #     reservations:
+  #   #       devices:
+  #   #         - driver: nvidia
+  #   #           count: all
+  #   #           capabilities: [gpu]
+
+volumes:
+  mailcull-data:
+  # ollama-models:
+
+# ── Ollama wiring notes ───────────────────────────────────────────────────────
+#
+# Option A — Ollama on the host (already running):
+#   Linux:   OLLAMA_BASE_URL=http://172.17.0.1:11434  (or use extra_hosts)
+#   macOS:   OLLAMA_BASE_URL=http://host.docker.internal:11434
+#   Add to mailcull service if on Linux:
+#     extra_hosts:
+#       - "host.docker.internal:host-gateway"
+#
+# Option B — Ollama as a Compose service (uncomment above):
+#   OLLAMA_BASE_URL=http://ollama:11434
