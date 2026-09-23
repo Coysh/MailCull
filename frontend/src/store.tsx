@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useReducer, useEffect, useRef } from 'react';
+import React, { createContext, useCallback, useContext, useReducer, useEffect } from 'react';
 import type { Sender, Screen, SettingsSection, ScanStatus, AuthStatus, ActionResult, Decision } from './types';
+import { DONE_STATUSES } from './types';
 import * as api from './api';
 
 interface State {
@@ -15,6 +16,8 @@ interface State {
   filterCategory: string;
   filterCapability: string;
   filterDecision: string;
+  /** 'active' hides senders that are already handled */
+  filterStatus: string;
   sortBy: 'count' | 'sender' | 'last';
   sortDir: 'asc' | 'desc';
   showShortcuts: boolean;
@@ -29,11 +32,12 @@ interface State {
     confirmStep: boolean;
     heuristicFallback: boolean;
     muteAction: 'archive' | 'trash';
-    deleteMode: 'trash' | 'permanent';
     snoozeDays: number;
     ollamaUrl: string;
     ollamaModel: string;
     scanDays: number;
+    browserInstalled: boolean;
+    graceDays: number;
   };
 }
 
@@ -54,10 +58,12 @@ type Action =
   | { type: 'SET_FILTER_CATEGORY'; v: string }
   | { type: 'SET_FILTER_CAPABILITY'; v: string }
   | { type: 'SET_FILTER_DECISION'; v: string }
+  | { type: 'SET_FILTER_STATUS'; v: string }
+  | { type: 'UPDATE_SENDER'; sender: Sender }
+  | { type: 'UPDATE_RESULT'; senderId: string; patch: Partial<ActionResult> }
   | { type: 'SET_SORT'; by: 'count' | 'sender' | 'last' }
   | { type: 'TOGGLE_SHORTCUTS' }
   | { type: 'SET_DRY_RUN'; value: boolean }
-  | { type: 'REMOVE_SENDERS'; ids: string[] }
   | { type: 'SET_OLLAMA_UP'; up: boolean; checking?: boolean }
   | { type: 'SET_SCAN_ID'; id: number | null }
   | { type: 'SET_SCAN_STATUS'; status: ScanStatus | null }
@@ -78,6 +84,7 @@ const initialState: State = {
   filterCategory: 'all',
   filterCapability: 'all',
   filterDecision: 'all',
+  filterStatus: 'active',
   sortBy: 'count',
   sortDir: 'desc',
   showShortcuts: false,
@@ -92,11 +99,12 @@ const initialState: State = {
     confirmStep: true,
     heuristicFallback: true,
     muteAction: 'archive',
-    deleteMode: 'trash',
     snoozeDays: 30,
     ollamaUrl: 'http://localhost:11434',
     ollamaModel: 'llama3.2:3b',
     scanDays: 365,
+    browserInstalled: false,
+    graceDays: 7,
   },
 };
 
@@ -130,6 +138,11 @@ function reducer(state: State, action: Action): State {
     case 'SET_FILTER_CATEGORY': return { ...state, filterCategory: action.v, focusedIdx: 0 };
     case 'SET_FILTER_CAPABILITY': return { ...state, filterCapability: action.v, focusedIdx: 0 };
     case 'SET_FILTER_DECISION': return { ...state, filterDecision: action.v, focusedIdx: 0 };
+    case 'SET_FILTER_STATUS': return { ...state, filterStatus: action.v, focusedIdx: 0 };
+    case 'UPDATE_SENDER':
+      return { ...state, senders: state.senders.map(s => s.id === action.sender.id ? action.sender : s) };
+    case 'UPDATE_RESULT':
+      return { ...state, lastResults: state.lastResults.map(r => r.sender_id === action.senderId ? { ...r, ...action.patch } : r) };
     case 'SET_SORT': {
       const sameCol = state.sortBy === action.by;
       const newDir = sameCol ? (state.sortDir === 'desc' ? 'asc' : 'desc') : (action.by === 'count' ? 'desc' : 'asc');
@@ -137,10 +150,6 @@ function reducer(state: State, action: Action): State {
     }
     case 'TOGGLE_SHORTCUTS': return { ...state, showShortcuts: !state.showShortcuts };
     case 'SET_DRY_RUN': return { ...state, dryRun: action.value };
-    case 'REMOVE_SENDERS': {
-      const ids = new Set(action.ids);
-      return { ...state, senders: state.senders.filter(s => !ids.has(s.id)), selectedIds: new Set([...state.selectedIds].filter(id => !ids.has(id))) };
-    }
     case 'SET_OLLAMA_UP': return { ...state, ollamaUp: action.up, ollamaChecking: action.checking ?? false };
     case 'SET_SCAN_ID': return { ...state, scanId: action.id };
     case 'SET_SCAN_STATUS': return { ...state, scanStatus: action.status };
@@ -159,7 +168,10 @@ interface Ctx {
   state: State;
   dispatch: React.Dispatch<Action>;
   filtered: Sender[];
+  /** Senders with a decision that still needs executing */
   decided: Sender[];
+  reloadSenders: () => Promise<void>;
+  checkOllama: () => void;
 }
 
 const StoreCtx = createContext<Ctx>(null!);
@@ -168,7 +180,24 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
 
   const filtered = filterAndSort(state);
-  const decided = state.senders.filter(s => s.decision);
+  const decided = state.senders.filter(s => s.decision && !DONE_STATUSES.has(s.status));
+
+  const reloadSenders = useCallback(async () => {
+    dispatch({ type: 'SET_SENDERS_LOADING', loading: true });
+    try {
+      dispatch({ type: 'SET_SENDERS', senders: await api.getSenders() });
+    } catch {
+      dispatch({ type: 'SET_SENDERS_LOADING', loading: false });
+    }
+  }, []);
+
+  // Checked by the backend: the browser can't reach a LAN Ollama (CORS)
+  const checkOllama = useCallback(() => {
+    dispatch({ type: 'SET_OLLAMA_UP', up: false, checking: true });
+    api.getOllamaStatus()
+      .then(r => dispatch({ type: 'SET_OLLAMA_UP', up: r.reachable }))
+      .catch(() => dispatch({ type: 'SET_OLLAMA_UP', up: false }));
+  }, []);
 
   // Poll auth status on mount
   useEffect(() => {
@@ -181,6 +210,8 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       dispatch({ type: 'SET_SETTING', key: 'ollamaUrl', value: s.ollama_base_url });
       dispatch({ type: 'SET_SETTING', key: 'ollamaModel', value: s.ollama_model });
       dispatch({ type: 'SET_SETTING', key: 'scanDays', value: s.scan_since_days });
+      dispatch({ type: 'SET_SETTING', key: 'browserInstalled', value: s.browser_installed && s.browser_unsubscribe });
+      dispatch({ type: 'SET_SETTING', key: 'graceDays', value: s.unsub_grace_days });
       dispatch({ type: 'SET_DRY_RUN', value: s.dry_run });
     }).catch(() => {});
   }, []);
@@ -188,23 +219,16 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   // Load senders when connected and on review screen
   useEffect(() => {
     if (state.authStatus.connected && (state.screen === 'review' || state.screen === 'confirm' || state.screen === 'results')) {
-      dispatch({ type: 'SET_SENDERS_LOADING', loading: true });
-      api.getSenders().then(senders => dispatch({ type: 'SET_SENDERS', senders })).catch(() => dispatch({ type: 'SET_SENDERS_LOADING', loading: false }));
+      reloadSenders();
     }
-  }, [state.authStatus.connected, state.screen]);
+  }, [state.authStatus.connected, state.screen, reloadSenders]);
 
   // Check Ollama reachability
   useEffect(() => {
-    const check = () => {
-      dispatch({ type: 'SET_OLLAMA_UP', up: false, checking: true });
-      fetch(state.settings.ollamaUrl + '/api/tags', { signal: AbortSignal.timeout(5000) })
-        .then(r => dispatch({ type: 'SET_OLLAMA_UP', up: r.ok }))
-        .catch(() => dispatch({ type: 'SET_OLLAMA_UP', up: false }));
-    };
-    check();
-    const id = setInterval(check, 30_000);
+    checkOllama();
+    const id = setInterval(checkOllama, 30_000);
     return () => clearInterval(id);
-  }, [state.settings.ollamaUrl]);
+  }, [state.settings.ollamaUrl, checkOllama]);
 
   // Poll scan status when scanning
   useEffect(() => {
@@ -223,13 +247,20 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     return () => clearInterval(id);
   }, [state.screen, state.scanId]);
 
-  return <StoreCtx.Provider value={{ state, dispatch, filtered, decided }}>{children}</StoreCtx.Provider>;
+  return (
+    <StoreCtx.Provider value={{ state, dispatch, filtered, decided, reloadSenders, checkOllama }}>
+      {children}
+    </StoreCtx.Provider>
+  );
 }
 
 export const useStore = () => useContext(StoreCtx);
 
 function filterAndSort(state: State): Sender[] {
   let list = state.senders.filter(s => {
+    if (state.filterStatus === 'active' && DONE_STATUSES.has(s.status)) return false;
+    if (state.filterStatus === 'done' && !DONE_STATUSES.has(s.status)) return false;
+    if (!['active', 'done', 'all'].includes(state.filterStatus) && s.status !== state.filterStatus) return false;
     if (state.filterCategory !== 'all' && s.category !== state.filterCategory) return false;
     if (state.filterCapability !== 'all' && s.capability !== state.filterCapability) return false;
     if (state.filterDecision === 'undecided' && s.decision !== null) return false;

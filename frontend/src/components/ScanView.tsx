@@ -18,9 +18,10 @@ export function ScanView() {
 
   const pct = scan?.progress_pct ?? 0;
   const phase = scan?.phase ?? 'initialising';
+  const phaseName = PHASE_LABELS[phase] ?? _capitalise(phase);
   const phaseLabel = state.ollamaUp
-    ? `${_capitalise(phase)} · ${state.settings.ollamaModel}`
-    : `${_capitalise(phase)} · heuristic mode`;
+    ? `${phaseName} · ${state.settings.ollamaModel}`
+    : `${phaseName} · heuristic mode`;
 
   const sampleSenders = state.senders.slice(0, 8);
 
@@ -108,6 +109,10 @@ function StatCard({ value, label, color }: { value: string; label: string; color
     </div>
   );
 }
+
+const PHASE_LABELS: Record<string, string> = {
+  links: 'Finding unsubscribe links',
+};
 
 function _capitalise(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);

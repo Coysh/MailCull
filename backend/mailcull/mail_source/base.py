@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import AsyncIterator
+from typing import AsyncIterator, Awaitable, Callable
 
 
 @dataclass
@@ -16,6 +16,7 @@ class RawMessage:
     date_str: str
     list_unsubscribe: str | None        # raw header value
     list_unsubscribe_post: str | None   # raw header value
+    internal_date_ms: int = 0           # server receive time (reliable ordering)
 
 
 class MailSource(ABC):
@@ -50,8 +51,18 @@ class MailSource(ABC):
         self,
         since_days: int,
         batch_size: int = 100,
+        on_total: Callable[[int], Awaitable[None]] | None = None,
     ) -> AsyncIterator[list[RawMessage]]:
         """
         Yield batches of RawMessage covering the given time window.
+        on_total(n) is awaited once the message count is known, before the first batch.
         Yields before classification so the UI can stream results.
+        """
+
+    @abstractmethod
+    async def find_body_unsubscribe_links(self, message_ids: dict[str, str]) -> dict[str, list[str]]:
+        """
+        For each {key: message_id}, fetch that message's body and return
+        {key: [unsubscribe URLs found in it]}. Bodies are parsed in memory
+        and never persisted.
         """

@@ -1,9 +1,11 @@
 import React from 'react';
 import { C } from './tokens';
 import { useStore } from '../store';
+import * as api from '../api';
 
 export function TopBar() {
-  const { state, dispatch } = useStore();
+  const { state, dispatch, checkOllama } = useStore();
+  const missing = state.authStatus.missing_scopes ?? [];
 
   const screenLabels: Record<string, string> = {
     review: 'review', scanning: 'scan', confirm: 'confirm', results: 'results', settings: 'settings',
@@ -31,8 +33,8 @@ export function TopBar() {
       )}
 
       <button
-        title="Toggle Ollama status"
-        onClick={() => dispatch({ type: 'SET_OLLAMA_UP', up: !state.ollamaUp })}
+        title="Re-check Ollama"
+        onClick={checkOllama}
         style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'transparent', border: `1px solid ${C.border}`, borderRadius: 2, padding: '3px 9px', cursor: 'pointer' }}
         onMouseEnter={e => (e.currentTarget as HTMLButtonElement).style.borderColor = C.borderHov}
         onMouseLeave={e => (e.currentTarget as HTMLButtonElement).style.borderColor = C.border}
@@ -41,6 +43,14 @@ export function TopBar() {
         <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: C.textFaint }}>ollama</span>
         <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: state.ollamaUp ? C.green : C.amber }}>{state.ollamaUp ? 'up' : 'down'}</span>
       </button>
+
+      {missing.length > 0 && (
+        <button
+          title={`Not granted: ${missing.map(s => s.split('/').pop()).join(', ')}`}
+          onClick={async () => { const { consent_url } = await api.getAuthStartUrl(); window.location.href = consent_url; }}
+          style={{ background: C.amberBg, border: `1px solid ${C.amberBorder}`, borderRadius: 2, padding: '3px 9px', cursor: 'pointer', color: C.amber, fontSize: 11 }}
+        >Re-authorise for email unsubscribes</button>
+      )}
 
       {state.authStatus.account && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 2, padding: '3px 9px' }}>

@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-logger = logging.getLogger(__name__)
-
 from ..config import get_settings
 from ..state import get_gmail
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -27,6 +27,8 @@ class AuthStatusResponse(BaseModel):
     connected: bool
     account: str | None = None
     scopes: list[str] = []
+    # Requested by this version but not granted by the stored token (re-authorise to fix)
+    missing_scopes: list[str] = []
 
 
 @router.get("/start", response_model=AuthStartResponse)
@@ -59,7 +61,8 @@ async def auth_status():
         return AuthStatusResponse(connected=False)
     account = await gmail.get_account_email()
     scopes = await gmail.get_granted_scopes()
-    return AuthStatusResponse(connected=True, account=account, scopes=scopes)
+    missing = [s for s in gmail.requested_scopes if s not in scopes]
+    return AuthStatusResponse(connected=True, account=account, scopes=scopes, missing_scopes=missing)
 
 
 @router.post("/disconnect")

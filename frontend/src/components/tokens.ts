@@ -55,16 +55,34 @@ export const CAT_COLORS: Record<string, [string, string]> = {
 
 export const CAP_COLORS: Record<string, [string, string]> = {
   one_click: [C.green,  '#0F2417'],
-  link:      [C.amber,  '#221E0C'],
   mailto:    [C.blue,   '#0F1B33'],
+  link:      [C.amber,  '#221E0C'],
+  body_link: [C.cyan,   '#0E2429'],
   none:      [C.textFaint, '#1B1E23'],
 };
 
 export const CAP_LABELS: Record<string, string> = {
   one_click: 'One-click',
-  link: 'Needs link',
   mailto: 'Mailto',
+  link: 'Web page',
+  body_link: 'Link in body',
   none: 'Not possible',
+};
+
+/** [label, colour, background] per sender/result status */
+export const STATUS_META: Record<string, [string, string, string]> = {
+  unsubscribed:  ['Unsubscribed',  C.teal,      '#0E2925'],
+  unsub_pending: ['Verifying',     C.teal,      '#0E2925'],
+  still_sending: ['Still sending', C.redBright, '#2A1416'],
+  muted:         ['Muted',         '#C3C8D0',   '#1B1E23'],
+  archived:      ['Archived',      C.cyan,      '#0E2429'],
+  deleted:       ['Deleted',       C.redBright, '#2A1416'],
+  kept:          ['Kept',          C.green,     '#0F2417'],
+  needs_link:    ['Needs link',    C.amber,     '#221E0C'],
+  failed:        ['Failed',        C.redBright, '#2A1416'],
+  transactional: ['Tagged',        C.blue,      '#0F1B33'],
+  snoozed:       ['Snoozed',       C.amber,     '#221E0C'],
+  pending:       ['Pending',       C.textFaint, '#1B1E23'],
 };
 
 export const DEC_LABELS: Record<string, string> = {

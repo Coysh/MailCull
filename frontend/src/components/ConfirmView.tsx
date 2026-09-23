@@ -1,13 +1,16 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { C, CAT_COLORS, CAP_COLORS, CAP_LABELS } from './tokens';
 import { useStore } from '../store';
 import * as api from '../api';
-import type { Sender } from '../types';
+import type { ActionPreview, ActionResult, Sender } from '../types';
+
+const SEND_SCOPE = 'https://www.googleapis.com/auth/gmail.send';
 
 export function ConfirmView() {
   const { state, dispatch, decided } = useStore();
   const [executing, setExecuting] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const [previews, setPreviews] = useState<Record<string, ActionPreview>>({});
 
   const gUnsub = decided.filter(s => s.decision === 'unsubscribe');
   const gMute  = decided.filter(s => s.decision === 'mute');
@@ -17,35 +20,50 @@ export function ConfirmView() {
   const cTrans = decided.filter(s => s.decision === 'transactional').length;
   const delMsgs = gDelete.reduce((a, s) => a + s.message_count, 0);
 
+  // The backend plans each unsubscribe's full fallback chain
+  const unsubKey = gUnsub.map(s => s.id).join(',');
+  useEffect(() => {
+    if (!gUnsub.length) return;
+    api.postPreview(gUnsub.map(s => s.id))
+      .then(list => setPreviews(Object.fromEntries(list.map(p => [p.sender_id, p]))))
+      .catch(console.error);
+  }, [unsubKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const canSend = state.authStatus.scopes.includes(SEND_SCOPE);
+  const mailtoBlocked = gUnsub.filter(s => s.mailto_links.length > 0 && !canSend);
+
   const method = (s: Sender): [string, string] => {
-    if (s.capability === 'one_click') return ['one-click POST', C.green];
-    if (s.capability === 'link') return ['opens link', C.amber];
-    if (s.capability === 'mailto') return ['mailto sent', C.blue];
-    return ['no method', C.textFaint];
+    const p = previews[s.id];
+    if (!p) return ['planning…', C.textFaint];
+    if (p.method === 'none') return ['no method — use Mute', C.redBright];
+    return [p.description, p.needs_manual ? C.amber : C.green];
   };
 
   const handleExecute = async () => {
     const total = decided.length;
     setExecuting(true);
     setProgress({ done: 0, total });
-    const allResults: import('../types').ActionResult[] = [];
-    try {
-      for (const sender of decided) {
-        const results = await api.postExecute([sender.id]);
-        allResults.push(...results);
-        setProgress(p => ({ ...p, done: p.done + 1 }));
+    const opts = { mute_action: state.settings.muteAction, snooze_days: state.settings.snoozeDays };
+    const allResults: ActionResult[] = [];
+    // One request per sender so progress is live and one failure can't abort the rest
+    for (const sender of decided) {
+      try {
+        allResults.push(...await api.postExecute([sender.id], opts));
+      } catch (err) {
+        allResults.push({
+          sender_id: sender.id, from_name: sender.from_name, from_address: sender.from_address,
+          decision: sender.decision, method: 'request', status: 'failed', detail: String(err),
+          can_undo: false, link: null, error: String(err), http_status: null, attempts: [],
+          action_id: null, skipped: false,
+        });
       }
-      const executedIds = decided.map(s => s.id);
-      dispatch({ type: 'SET_RESULTS', results: allResults });
-      dispatch({ type: 'REMOVE_SENDERS', ids: executedIds });
-      dispatch({ type: 'SET_SCREEN', screen: 'results' });
-    } catch (err) {
-      console.error(err);
-      setExecuting(false);
+      setProgress(p => ({ ...p, done: p.done + 1 }));
     }
+    dispatch({ type: 'SET_RESULTS', results: allResults });
+    dispatch({ type: 'SET_SCREEN', screen: 'results' });
   };
 
-  const deleteMode = state.settings.deleteMode === 'permanent' ? 'Permanent delete · irreversible' : 'Move to Trash · recoverable 30 days';
+  const deleteMode = 'Move to Trash · recoverable 30 days';
   const muteMode = state.settings.muteAction === 'trash' ? 'Move to Trash (future mail)' : 'Skip inbox (archive) · keeps future mail out';
   const destructiveWarning = [
     gDelete.length ? `${gDelete.length} sender${gDelete.length !== 1 ? 's' : ''} → ${delMsgs.toLocaleString()} messages moved to Trash.` : '',
@@ -81,7 +99,19 @@ export function ConfirmView() {
           </div>
         )}
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 8, margin: '16px 0' }}>
+        {mailtoBlocked.length > 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: C.amberBg, border: `1px solid ${C.amberBorder}`, borderRadius: 3, padding: '9px 13px', marginTop: 14 }}>
+            <span style={{ fontSize: 11, color: C.amber, lineHeight: 1.5 }}>
+              {mailtoBlocked.length} sender{mailtoBlocked.length !== 1 ? 's' : ''} can unsubscribe by email, but MailCull hasn't been granted permission to send mail. Those steps will be skipped.
+            </span>
+            <button
+              onClick={async () => { const { consent_url } = await api.getAuthStartUrl(); window.location.href = consent_url; }}
+              style={{ marginLeft: 'auto', flexShrink: 0, background: 'transparent', border: `1px solid ${C.amberBorder}`, color: C.amber, fontSize: 11, padding: '4px 10px', borderRadius: 2, cursor: 'pointer' }}
+            >Re-authorise</button>
+          </div>
+        )}
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', gap: 8, margin: '16px 0' }}>
           <StatCard count={gUnsub.length} label="unsubscribe" color={C.amber} />
           <StatCard count={gMute.length} label="mute" color="#C3C8D0" />
           <StatCard count={gArchive.length} label="archive" color={C.cyan} />
@@ -91,7 +121,7 @@ export function ConfirmView() {
         </div>
 
         {gUnsub.length > 0 && (
-          <GroupBlock title="UNSUBSCRIBE" count={gUnsub.length} headerBg="#1E1B0C" border={C.amberBorder} headerText={C.amber} subtitle="Sends opt-out via header, link, or mailto">
+          <GroupBlock title="UNSUBSCRIBE" count={gUnsub.length} headerBg="#1E1B0C" border={C.amberBorder} headerText={C.amber} subtitle="Tries each method in order until one works">
             {gUnsub.map(s => {
               const [m, mc] = method(s);
               return (
@@ -102,7 +132,7 @@ export function ConfirmView() {
                   </div>
                   <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: C.textFaint, fontVariantNumeric: 'tabular-nums' }}>{s.message_count.toLocaleString()} msgs</span>
                   <span style={{ fontSize: 10, fontWeight: 600, color: CAP_COLORS[s.capability as string]?.[0] }}>{CAP_LABELS[s.capability]}</span>
-                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: mc, minWidth: 120, textAlign: 'right' }}>{m}</span>
+                  <span title={m} style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: mc, maxWidth: 320, textAlign: 'right', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{m}</span>
                 </div>
               );
             })}
@@ -149,7 +179,7 @@ export function ConfirmView() {
                   <span style={{ fontSize: 12, fontWeight: 500 }}>{s.from_name}</span>
                   <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: C.textDim }}>{s.from_address}</span>
                 </div>
-                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: C.textFaint }}>filter: from:{s.domain}</span>
+                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: C.textFaint }}>filter: from:{s.from_address}</span>
               </div>
             ))}
           </GroupBlock>

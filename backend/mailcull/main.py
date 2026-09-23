@@ -23,6 +23,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     db.init_db_path(settings.db_path)
     await db.migrate()
+    await db.fail_interrupted_scans()
     init_state()
     if settings.app_host != "127.0.0.1":
         logger.warning(
@@ -72,7 +73,14 @@ async def health():
     }
 
 
-# Serve React frontend from /dist if built — must come last (catch-all mount)
-_frontend_dist = Path(__file__).parent.parent.parent / "frontend" / "dist"
-if _frontend_dist.exists():
+# Serve React frontend from dist if built — must come last (catch-all mount).
+# Repo checkout: <repo>/frontend/dist. Docker: /app/frontend/dist.
+_here = Path(__file__).resolve()
+_frontend_candidates = [
+    Path(os.environ["FRONTEND_DIST"]) if os.environ.get("FRONTEND_DIST") else None,
+    _here.parents[2] / "frontend" / "dist",
+    _here.parents[1] / "frontend" / "dist",
+]
+_frontend_dist = next((p for p in _frontend_candidates if p and p.is_dir()), None)
+if _frontend_dist:
     app.mount("/", StaticFiles(directory=str(_frontend_dist), html=True), name="frontend")

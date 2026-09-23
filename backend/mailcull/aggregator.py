@@ -3,12 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections import defaultdict
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
 from .mail_source.base import RawMessage
-from .mail_source.gmail import parse_list_unsubscribe
+from .mail_source.gmail import UnsubInfo, parse_unsubscribe_info
 from .models import Sender
 
 logger = logging.getLogger(__name__)
@@ -31,35 +30,16 @@ def aggregate(messages: list[RawMessage]) -> list[Sender]:
     return [b.to_sender() for b in buckets.values()]
 
 
-def merge_into(existing: list[Sender], new_batch: list[Sender]) -> list[Sender]:
-    """Merge a new batch of senders into an existing list (by from_address)."""
-    index = {s.from_address.lower(): s for s in existing}
-    for new in new_batch:
-        key = new.from_address.lower()
-        if key not in index:
-            index[key] = new
-        else:
-            old = index[key]
-            merged = Sender(
-                id=old.id,
-                from_name=old.from_name or new.from_name,
-                from_address=old.from_address,
-                domain=old.domain,
-                message_count=old.message_count + new.message_count,
-                first_seen=min(old.first_seen, new.first_seen),
-                last_seen=max(old.last_seen, new.last_seen),
-                sample_subjects=_dedup_subjects(old.sample_subjects + new.sample_subjects),
-                capability=new.capability if new.capability != "none" else old.capability,
-                unsubscribe_links=_dedup(old.unsubscribe_links + new.unsubscribe_links),
-                category=old.category,
-                rationale=old.rationale,
-                suggested_action=old.suggested_action,
-                classification_degraded=old.classification_degraded,
-                decision=old.decision,
-                status=old.status,
-            )
-            index[key] = merged
-    return list(index.values())
+def apply_unsub_info(sender: Sender, info: UnsubInfo, source: str = "header") -> Sender:
+    """Return a copy of sender whose capability and links all come from `info`."""
+    return sender.model_copy(update={
+        "capability": info.capability,
+        "one_click_url": info.one_click_url,
+        "http_links": info.http_urls,
+        "mailto_links": info.mailtos,
+        "unsubscribe_links": info.links[:5],
+        "unsubscribe_source": source if info.capability != "none" else None,
+    })
 
 
 class _Bucket:
@@ -67,42 +47,59 @@ class _Bucket:
         self.name = name
         self.address = address
         self.domain = _extract_domain(address)
-        self.messages: list[RawMessage] = []
-        self.subjects: list[str] = []
+        self.count = 0
+        self.subjects: list[tuple[int, str]] = []
         self.dates: list[str] = []
-        self._cap: str = "none"
-        self._links: list[str] = []
+        self.latest_ts = -1
+        self.latest_id: str | None = None
+        # Unsubscribe info from the newest message that advertised any.
+        # Tokens in these URLs are per-message and expire, so older ones are
+        # only a fallback when nothing newer exists.
+        self._unsub: UnsubInfo | None = None
+        self._unsub_key: tuple[int, int] = (-1, -1)
 
     def add(self, msg: RawMessage) -> None:
-        self.messages.append(msg)
-        if msg.subject and len(self.subjects) < _MAX_SUBJECTS:
-            self.subjects.append(msg.subject)
-        if msg.date_str:
-            self.dates.append(msg.date_str)
+        self.count += 1
+        ts = msg.internal_date_ms or _date_to_ms(msg.date_str)
+        if msg.subject:
+            self.subjects.append((ts, msg.subject))
+        day = _ms_to_iso(msg.internal_date_ms) if msg.internal_date_ms else _parse_date(msg.date_str)
+        if day:
+            self.dates.append(day)
+        if ts > self.latest_ts:
+            self.latest_ts = ts
+            self.latest_id = msg.message_id
+            if msg.from_name and msg.from_name != msg.from_address:
+                self.name = msg.from_name
 
-        cap, links = parse_list_unsubscribe(msg.list_unsubscribe, msg.list_unsubscribe_post)
-        if _cap_priority(cap) > _cap_priority(self._cap):
-            self._cap = cap
-        for link in links:
-            if link not in self._links:
-                self._links.append(link)
+        info = parse_unsubscribe_info(msg.list_unsubscribe, msg.list_unsubscribe_post)
+        if info.capability == "none":
+            return
+        # Newest wins; on equal timestamps prefer the more automatable method
+        key = (ts, _CAP_RANK[info.capability])
+        if key > self._unsub_key:
+            self._unsub_key = key
+            self._unsub = info
 
     def to_sender(self) -> Sender:
-        iso_dates = [_parse_date(d) for d in self.dates if _parse_date(d)]
-        first = min(iso_dates) if iso_dates else _today_iso()
-        last = max(iso_dates) if iso_dates else _today_iso()
-        return Sender(
+        first = min(self.dates) if self.dates else _today_iso()
+        last = max(self.dates) if self.dates else _today_iso()
+        newest_subjects = [s for _, s in sorted(self.subjects, key=lambda x: -x[0])]
+        sender = Sender(
             id=_sender_id(self.address),
             from_name=self.name,
             from_address=self.address,
             domain=self.domain,
-            message_count=len(self.messages),
+            message_count=self.count,
             first_seen=first,
             last_seen=last,
-            sample_subjects=self.subjects[:_MAX_SUBJECTS],
-            capability=self._cap,
-            unsubscribe_links=self._links[:5],
+            sample_subjects=_dedup(newest_subjects)[:_MAX_SUBJECTS],
+            latest_message_id=self.latest_id,
+            latest_ts=max(self.latest_ts, 0),
         )
+        if self._unsub:
+            sender = apply_unsub_info(sender, self._unsub, "header")
+        return sender
 
 
 def _sender_id(address: str) -> str:
@@ -121,15 +118,22 @@ def _parse_date(date_str: str) -> str | None:
         return None
 
 
+def _ms_to_iso(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).date().isoformat()
+
+
+def _date_to_ms(date_str: str) -> int:
+    try:
+        return int(parsedate_to_datetime(date_str).timestamp() * 1000)
+    except Exception:
+        return 0
+
+
 def _today_iso() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
-_CAP_RANK = {"one_click": 3, "mailto": 2, "link": 2, "none": 0}
-
-
-def _cap_priority(cap: str) -> int:
-    return _CAP_RANK.get(cap, 0)
+_CAP_RANK = {"one_click": 4, "mailto": 3, "link": 2, "body_link": 1, "none": 0}
 
 
 def _dedup(lst: list[str]) -> list[str]:
@@ -140,7 +144,3 @@ def _dedup(lst: list[str]) -> list[str]:
             seen.add(item)
             out.append(item)
     return out
-
-
-def _dedup_subjects(lst: list[str]) -> list[str]:
-    return _dedup(lst)[:_MAX_SUBJECTS]

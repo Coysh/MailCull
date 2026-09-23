@@ -41,15 +41,25 @@ export const postDecisions = (items: { sender_id: string; decision: Decision }[]
 // Actions
 export const postPreview = (sender_ids: string[]) =>
   req<ActionPreview[]>('/actions/preview', { method: 'POST', body: JSON.stringify({ sender_ids }) });
-export const postExecute = (sender_ids: string[]) =>
-  req<ActionResult[]>('/actions/execute', { method: 'POST', body: JSON.stringify({ sender_ids, confirm: true }) });
+export interface ExecuteOptions { force?: boolean; mute_action?: 'archive' | 'trash'; snooze_days?: number; }
+export const postExecute = (sender_ids: string[], opts: ExecuteOptions = {}) =>
+  req<ActionResult[]>('/actions/execute', { method: 'POST', body: JSON.stringify({ sender_ids, confirm: true, ...opts }) });
+export const postUndo = (action_id: number) =>
+  req<{ status: string; detail: string }>(`/actions/${action_id}/undo`, { method: 'POST' });
+export const postManualDone = (sender_id: string) =>
+  req<Sender>(`/senders/${sender_id}/manual-done`, { method: 'POST' });
 export const getActionLog = () => req<unknown[]>('/actions/log');
 
 // Ollama status
 export const getHealth = () => req<{ status: string; dry_run: boolean; version: string }>('/health');
 
 // Settings
-export interface BackendSettings { ollama_base_url: string; ollama_model: string; dry_run: boolean; scan_since_days: number; }
+export interface BackendSettings {
+  ollama_base_url: string; ollama_model: string; dry_run: boolean; scan_since_days: number;
+  body_link_scan: boolean; browser_unsubscribe: boolean; browser_installed: boolean; unsub_grace_days: number;
+}
 export const getSettings = () => req<BackendSettings>('/settings');
 export const patchSettings = (patch: Partial<Pick<BackendSettings, 'ollama_base_url' | 'ollama_model'>>) =>
   req<BackendSettings>('/settings', { method: 'PATCH', body: JSON.stringify(patch) });
+export const getOllamaStatus = () => req<{ reachable: boolean; base_url: string; model: string }>('/settings/ollama-status');
+export const postWipe = () => req<{ status: string }>('/settings/wipe?confirm=true', { method: 'POST' });

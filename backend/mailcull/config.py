@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     google_oauth_client_id: str = ""
     google_oauth_client_secret: str = ""
     token_path: Path = Path("/data/token.json")
+    # Fernet key for the token file; auto-generated next to the token if empty
+    token_encryption_key: str = ""
 
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.2:3b"
@@ -29,8 +31,16 @@ class Settings(BaseSettings):
         "https://www.googleapis.com/auth/gmail.settings.basic",
     ]
 
-    # Optional: include gmail.send for mailto unsubscribes
-    include_send_scope: bool = False
+    # gmail.send is needed for mailto unsubscribes (sent from your own account)
+    include_send_scope: bool = True
+
+    # ── Unsubscribe ──
+    # Fetch the newest message body for senders with no List-Unsubscribe header
+    body_link_scan: bool = True
+    # Drive a headless browser for link-only unsubscribe pages (needs playwright)
+    browser_unsubscribe: bool = True
+    # Mail arriving this many days after an unsubscribe marks the sender "still sending"
+    unsub_grace_days: int = 7
 
 
 _settings: Settings | None = None

@@ -142,6 +142,12 @@ function ConnectionSection() {
             </div>
           ))}
         </div>
+        {(state.authStatus.missing_scopes ?? []).map(scope => (
+          <div key={scope} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 0', borderBottom: `1px solid ${C.borderSub}` }}>
+            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: C.textMuted, flex: 1 }}>{scope.split('/').pop()}</span>
+            <span style={{ fontSize: 11, color: C.amber }}>not granted — re-authorise</span>
+          </div>
+        ))}
         <div style={{ marginTop: 14 }}>
           <GhostBtn label="Re-authorise" onClick={async () => { const { consent_url } = await api.getAuthStartUrl(); window.location.href = consent_url; }} />
         </div>
@@ -172,14 +178,10 @@ function AISection() {
   const { state, dispatch } = useStore();
   const setS = (k: keyof typeof state.settings, v: unknown) => dispatch({ type: 'SET_SETTING', key: k, value: v });
 
-  const saveUrl = () => api.patchSettings({ ollama_base_url: state.settings.ollamaUrl }).catch(() => {});
-  const saveModel = () => api.patchSettings({ ollama_model: state.settings.ollamaModel }).catch(() => {});
-  const testConnection = () => {
-    dispatch({ type: 'SET_OLLAMA_UP', up: false, checking: true });
-    fetch(state.settings.ollamaUrl + '/api/tags', { signal: AbortSignal.timeout(5000) })
-      .then(r => dispatch({ type: 'SET_OLLAMA_UP', up: r.ok }))
-      .catch(() => dispatch({ type: 'SET_OLLAMA_UP', up: false }));
-  };
+  const { checkOllama } = useStore();
+  const saveUrl = () => api.patchSettings({ ollama_base_url: state.settings.ollamaUrl }).then(checkOllama).catch(console.error);
+  const saveModel = () => api.patchSettings({ ollama_model: state.settings.ollamaModel }).catch(console.error);
+  const testConnection = () => { saveUrl(); };
 
   return (
     <div style={{ animation: 'fadeIn .14s ease' }}>
@@ -233,8 +235,13 @@ function BehaviourSection() {
         <Row><RowLabel title="Mute creates" sub="Gmail filter for future mail" />
           <Sel value={state.settings.muteAction} onChange={v => setS('muteAction', v)} options={[['archive','Skip inbox (archive)'],['trash','Move to Trash']]} />
         </Row>
-        <Row><RowLabel title="Delete does" sub="For 'delete existing mail'" />
-          <Sel value={state.settings.deleteMode} onChange={v => setS('deleteMode', v)} options={[['trash','Move to Trash'],['permanent','Permanent delete']]} />
+        <Row><RowLabel title="Delete does" sub="Moves existing mail to Trash (Gmail empties it after 30 days)" />
+          <span style={{ fontSize: 12, color: C.textMuted }}>Move to Trash</span>
+        </Row>
+        <Row><RowLabel title="Unsubscribe pages" sub="Pages that need a click are opened in a hidden browser" />
+          <span style={{ fontSize: 12, color: state.settings.browserInstalled ? C.green : C.amber }}>
+            {state.settings.browserInstalled ? 'Headless browser ready' : 'Browser not installed — manual links'}
+          </span>
         </Row>
         <Row><RowLabel title="Snooze default" sub="Re-surface snoozed senders after" />
           <Sel value={String(state.settings.snoozeDays)} onChange={v => setS('snoozeDays', Number(v))} options={[['7','7 days'],['14','14 days'],['30','30 days'],['90','90 days']]} />
@@ -245,6 +252,20 @@ function BehaviourSection() {
 }
 
 function DataSection() {
+  const { state } = useStore();
+  const download = (name: string, type: string, body: string) => {
+    const url = URL.createObjectURL(new Blob([body], { type }));
+    const a = Object.assign(document.createElement('a'), { href: url, download: name });
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  const exportJson = () => download('mailcull-senders.json', 'application/json', JSON.stringify(state.senders, null, 2));
+  const exportCsv = () => {
+    const cols = ['from_name', 'from_address', 'message_count', 'last_seen', 'category', 'capability', 'decision', 'status', 'unsubscribed_at', 'unsub_method'] as const;
+    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const rows = state.senders.map(s => cols.map(c => esc(s[c])).join(','));
+    download('mailcull-senders.csv', 'text/csv', [cols.join(','), ...rows].join('\n'));
+  };
   return (
     <div style={{ animation: 'fadeIn .14s ease' }}>
       <SectionHeader title="Data" subtitle="Local database and exports." />
@@ -254,8 +275,8 @@ function DataSection() {
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: C.textMuted }}>/data/mailcull.db</span>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <GhostBtn label="Export JSON" />
-          <GhostBtn label="Export CSV" />
+          <GhostBtn label="Export JSON" onClick={exportJson} />
+          <GhostBtn label="Export CSV" onClick={exportCsv} />
         </div>
       </Card>
     </div>
@@ -279,7 +300,11 @@ function AppearanceSection() {
 }
 
 function DangerSection() {
-  const { dispatch } = useStore();
+  const { dispatch, reloadSenders } = useStore();
+  const wipe = async () => {
+    if (!window.confirm('Delete all local scan data, decisions and the action log? Gmail is not touched.')) return;
+    try { await api.postWipe(); await reloadSenders(); } catch (err) { alert(String(err)); }
+  };
   return (
     <div style={{ animation: 'fadeIn .14s ease' }}>
       <h2 style={{ fontSize: 15, fontWeight: 600, marginBottom: 3, color: C.redBright }}>Danger zone</h2>
@@ -291,7 +316,7 @@ function DangerSection() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: C.panel, border: `1px solid ${C.redBorder}`, borderRadius: 3, padding: '13px 15px' }}>
           <RowLabel title="Wipe local data" sub="Delete the local database. Gmail is untouched." />
-          <DangerBtn label="Wipe data" />
+          <DangerBtn label="Wipe data" onClick={wipe} />
         </div>
       </div>
     </div>

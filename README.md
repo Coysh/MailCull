@@ -2,7 +2,7 @@
 
 **Self-hosted Gmail inbox triage. Reads sender metadata locally, classifies with a local AI model, lets you unsubscribe or mute in bulk — nothing leaves your machine.**
 
-MailCull is a single-user tool for technical people who want to reclaim their inbox without handing email data to a third party. It reads only the headers of your Gmail messages (From, Subject, Date, List-Unsubscribe — never the body), runs classification through a local [Ollama](https://ollama.ai) model, and presents a dense batch-triage UI. You decide what happens; MailCull executes it.
+MailCull is a single-user tool for technical people who want to reclaim their inbox without handing email data to a third party. It reads the headers of your Gmail messages (From, Subject, Date, List-Unsubscribe). For senders without an unsubscribe header it also reads the newest message's body, **locally and in memory only**, to find an unsubscribe link. It runs classification through a local [Ollama](https://ollama.ai) model, and presents a dense batch-triage UI. You decide what happens; MailCull executes it.
 
 ---
 
@@ -16,14 +16,13 @@ Existing unsubscribe tools work by reading your email on their servers and sendi
 
 | Action | How |
 |---|---|
-| **Unsubscribe (one-click)** | HTTP POST to `List-Unsubscribe-Post` endpoint (RFC 8058). Fully automated, no browser. |
-| **Unsubscribe (link)** | Surfaces the link for you to open and confirm manually. |
-| **Unsubscribe (mailto)** | Sends a plain-text opt-out email via the Gmail API. |
+| **Unsubscribe** | Tries every method the sender offers, in order, until one works: **one-click** POST (RFC 8058) → **mailto** sent from your account → **headless browser** opens the unsubscribe page and clicks the opt-out button → **manual link** as a last resort. Each attempt is shown in Results. |
+| **Unsubscribe verification** | Later scans check whether mail kept arriving more than `UNSUB_GRACE_DAYS` after you unsubscribed. If it did, the sender is flagged **Still sending**, with one-click **Mute all**. |
 | **Mute** | Creates a Gmail filter that archives or trashes future mail from that sender. Works for senders with no unsubscribe header at all. |
-| **Delete existing mail** | Batch-trashes (or permanently deletes) all messages from a sender. Reversible by default. |
-| **Keep / Mark transactional / Snooze** | Local-state decisions with optional Gmail label. |
+| **Archive / Delete existing mail** | Archives or trashes *all* messages from a sender (paginated, no 500-message cap). **Undo** restores them. |
+| **Keep / Mark transactional / Snooze** | Transactional applies a `MailCull/Transactional` label. Snooze hides the sender until the snooze ends. |
 
-Every action requires explicit confirmation. A real-time **progress bar** tracks each sender as it is processed. Once execution completes, processed senders are removed from the review queue. **Dry run** is controlled via `DRY_RUN` in `.env` — set `true` during initial setup to simulate everything and verify the plan before committing. A `DRY RUN` badge appears in the header whenever it is active.
+Every action requires explicit confirmation. A real-time **progress bar** tracks each sender as it is processed. Handled senders move out of the default **To do** list, and executing again skips them (use **Retry** to force a re-run). **Dry run** is controlled via `DRY_RUN` in `.env` — set `true` during initial setup to simulate everything and verify the plan before committing. A `DRY RUN` badge appears in the header whenever it is active.
 
 ---
 
@@ -189,7 +188,8 @@ mkdir -p data
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
+pip install -e ".[dev,browser]"
+playwright install chromium    # headless browser for unsubscribe pages (optional)
 
 # Run from the backend directory with the .env one level up
 cd ..
@@ -289,7 +289,8 @@ For GPU support, uncomment the `deploy.resources` block in `docker-compose.yml` 
 |---|---|---|
 | `GOOGLE_OAUTH_CLIENT_ID` | *(required)* | OAuth 2.0 client ID from Google Cloud |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | *(required)* | OAuth 2.0 client secret |
-| `TOKEN_PATH` | `/data/token.json` | Where the refresh token is persisted (never commit this) |
+| `TOKEN_PATH` | `/data/token.json` | Where the refresh token is persisted, Fernet-encrypted (never commit this) |
+| `TOKEN_ENCRYPTION_KEY` | *(auto)* | Fernet key for the token file. If unset, a key is generated at `.token.key` next to the token (0600) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API base URL |
 | `OLLAMA_MODEL` | `llama3.2:3b` | Model name for classification |
 | `SCAN_SINCE_DAYS` | `365` | How many days back to read (query: `newer_than:Nd`) |
@@ -297,7 +298,10 @@ For GPU support, uncomment the `deploy.resources` block in `docker-compose.yml` 
 | `DB_PATH` | `/data/mailcull.db` | SQLite database path |
 | `APP_PORT` | `8420` | Port to bind to |
 | `APP_HOST` | `127.0.0.1` | Host to bind to — keep this as localhost |
-| `INCLUDE_SEND_SCOPE` | `false` | Request `gmail.send` to enable automated mailto unsubscribes |
+| `INCLUDE_SEND_SCOPE` | `true` | Request `gmail.send` so mailto unsubscribes can be sent from your account |
+| `BODY_LINK_SCAN` | `true` | During scans, look in the newest message body for an unsubscribe link when there's no header |
+| `BROWSER_UNSUBSCRIBE` | `true` | Use a headless browser (Playwright/Chromium) for unsubscribe pages that need a click |
+| `UNSUB_GRACE_DAYS` | `7` | Mail arriving this many days after unsubscribing flags the sender **Still sending** |
 
 ---
 
@@ -309,15 +313,16 @@ source .venv/bin/activate
 pytest -v
 ```
 
-33 tests covering:
+The suite covers:
 
-- RFC 2047-encoded From headers and display names
-- Bare angle-bracket addresses, Unicode display names
-- `List-Unsubscribe` header parsing: one-click (RFC 8058), link, mailto, none
-- RFC 8058 edge case: `List-Unsubscribe-Post` present but no HTTPS link → not one-click
-- Sender aggregation: grouping by address, case normalisation, date ranges, subject capping, capability priority
-- Stable sender ID generation
-- Action-method selection for every decision type (keep, unsubscribe × 4 capabilities, mute, delete, transactional)
+- RFC 2047-encoded From headers, display names, and `List-Unsubscribe` parsing (folding, `&amp;`, bare URLs, RFC 8058 rules)
+- Sender aggregation. The newest message's unsubscribe methods win, whatever order messages arrive in.
+- mailto parsing (keeps `+` and JSON token bodies intact)
+- One-click POST against a local HTTP server: 2xx, 303 follow, 307 re-POST, 4xx, and 5xx retry
+- The full fallback chain (one-click → mailto → page → manual), idempotency, and dry-run safety
+- "Still sending" verification and rescan upserts (real SQLite)
+- Body-link extraction from HTML and plain text
+- Headless-browser runs against local pages: multi-step confirmations, "unsubscribe from all" checkboxes, and never clicking "Keep me subscribed". Skipped if Chromium isn't installed.
 
 ---
 
@@ -385,7 +390,9 @@ mailcull/
 
 **MailSource interface** (`mail_source/base.py`): The Gmail adapter is behind a clean abstract interface. A future IMAP adapter (for personal Gmail without the API, or other providers) can implement the same four methods without touching the pipeline.
 
-**Metadata-only reads**: `users.messages.get` is called with `format=metadata` and an explicit `metadataHeaders` list. Message bodies, attachments, and thread content are never fetched. The Gmail API quota for metadata reads is also significantly higher than for full reads.
+**Metadata-first reads**: Every message is read with `format=metadata` and an explicit `metadataHeaders` list. The only exception is the newest message from each sender *without* a `List-Unsubscribe` header. That one is fetched with `format=full` so an unsubscribe link can be extracted from its body. Bodies are parsed in memory and discarded. Only the chosen URL is stored, and nothing is sent to Ollama. Set `BODY_LINK_SCAN=false` to stay strictly metadata-only.
+
+**Freshest unsubscribe token**: Unsubscribe URLs carry per-message tokens that expire. Each sender keeps the methods from its newest message that advertised any (ordered by Gmail's `internalDate`), and never mixes links from different messages.
 
 **Batch API**: Message IDs are fetched first (cheap list calls), then metadata is fetched in batches of up to 100 using `service.new_batch_http_request()`. This reduces round-trips by ~100× on a large mailbox.
 
@@ -403,17 +410,21 @@ mailcull/
 |---|---|---|
 | `GET` | `/api/auth/start` | Returns `{consent_url}` to redirect the user to |
 | `GET` | `/api/auth/callback` | Completes OAuth exchange (loopback redirect target) |
-| `GET` | `/api/auth/status` | `{connected, account, scopes}` |
+| `GET` | `/api/auth/status` | `{connected, account, scopes, missing_scopes}` |
 | `POST` | `/api/auth/disconnect` | Revokes token and clears credentials |
 | `POST` | `/api/scan` | Starts a scan, returns `{scan_id}` |
 | `GET` | `/api/scan/{id}` | Scan progress: phase, progress_pct, totals |
 | `GET` | `/api/scan/latest/status` | Most recent scan record |
-| `GET` | `/api/senders` | All senders; filterable by `category`, `capability`, `decision`; sortable by `count`, `sender`, `last` |
+| `GET` | `/api/senders` | All senders; filterable by `category`, `capability`, `decision`, `status`; sortable by `count`, `sender`, `last` |
+| `POST` | `/api/senders/{id}/manual-done` | Record a manually completed link unsubscribe |
 | `POST` | `/api/senders/classify` | Re-run LLM classification on all (or specified) senders |
 | `POST` | `/api/senders/decisions` | Set user decisions: `[{sender_id, decision}]` |
 | `POST` | `/api/actions/preview` | Per-sender plan for a given sender list — side-effect free |
-| `POST` | `/api/actions/execute` | Execute actions; requires `confirm: true`; respects `DRY_RUN` |
+| `POST` | `/api/actions/execute` | Execute actions; requires `confirm: true`; respects `DRY_RUN`; skips handled senders unless `force: true` |
+| `POST` | `/api/actions/{id}/undo` | Undo a mute, archive, delete or transactional label |
 | `GET` | `/api/actions/log` | Full action log |
+| `GET` | `/api/settings/ollama-status` | Server-side Ollama reachability check |
+| `POST` | `/api/settings/wipe?confirm=true` | Delete local scans, senders and action log (Gmail untouched) |
 | `GET` | `/api/health` | `{status, dry_run, version}` |
 
 Full OpenAPI schema is available at `http://localhost:8420/docs` when the server is running.
@@ -423,9 +434,11 @@ Full OpenAPI schema is available at `http://localhost:8420/docs` when the server
 ## Security notes
 
 - MailCull is designed for `127.0.0.1` only. The OAuth token in `TOKEN_PATH` grants full access to the Gmail scopes you authorised. Do not expose the app on a public interface.
-- The token file is written with `0600` permissions (owner read/write only).
+- The token file is Fernet-encrypted and written with `0600` permissions (owner read/write only).
+- The OAuth `state` parameter is checked on callback.
+- The headless browser uses a fresh, cookie-less context per page. It blocks images and media, and stores nothing.
 - No secrets are logged. `DRY_RUN=true` by default — you must explicitly disable it.
-- The LLM sees only: sender name, address, domain, message count, sample subjects, and whether a `List-Unsubscribe` header was present. No message content is ever passed to Ollama.
+- The LLM sees only: sender name, address, domain, message count, sample subjects, and whether an unsubscribe method was found. No message content is ever passed to Ollama.
 
 ---
 
@@ -433,8 +446,9 @@ Full OpenAPI schema is available at `http://localhost:8420/docs` when the server
 
 - **One Gmail account per instance.** MailCull is single-user by design.
 - **App Passwords / IMAP not supported.** Google Workspace disables App Passwords for accounts managed by an admin. The Gmail REST API with OAuth is the only reliable path.
-- **`link` unsubscribes are manual.** When a sender's only unsubscribe mechanism is a hosted web page (no `List-Unsubscribe-Post` header), MailCull surfaces the link but cannot complete the flow — you open it yourself and mark it done.
-- **`mailto` unsubscribes require `gmail.send`.** Disable by default. Enable via `INCLUDE_SEND_SCOPE=true` and re-authorise.
+- **Some unsubscribe pages still need you.** The headless browser handles single- and multi-step pages, email fields and "unsubscribe from all" checkboxes. It can't handle CAPTCHAs, logins, or preference centres with per-list toggles. Those fall back to a manual link that you open and mark done.
+- **"Verifying" means unconfirmed.** If the browser submitted a form but the page never confirmed it, the sender is marked *Verifying*. The next scans settle it one way or the other.
+- **`mailto` unsubscribes require `gmail.send`.** It's requested by default. Tokens granted before this change must be re-authorised: the header shows a *Re-authorise* button.
 - **Ollama classification quality depends on your model.** `llama3.2:3b` works well for most cases. For difficult classifications (ambiguous senders, non-English subjects), a larger model like `mistral:7b` or `qwen2.5:7b` gives better rationales.
 
 ---

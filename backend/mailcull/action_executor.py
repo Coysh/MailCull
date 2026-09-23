@@ -1,44 +1,64 @@
-"""ActionExecutor — performs unsubscribes, mutes, and deletions.
+"""ActionExecutor — performs unsubscribes, mutes, archives, deletions.
 
 Every write action:
   1. Requires explicit confirmation (the API gates this).
-  2. Respects the global DRY_RUN flag — logs but never touches Gmail.
-  3. Is logged to action_log with its outcome.
-  4. Is idempotent where possible.
+  2. Respects DRY_RUN — logs the plan but never touches Gmail or the sender's status.
+  3. Is logged to action_log with its outcome (and undo data where possible).
+  4. Is idempotent: senders already handled are skipped unless forced.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import re
-from email.utils import parseaddr
+from datetime import date, timedelta
 from typing import Any
-from urllib.parse import parse_qs, urlparse
 
-import aiohttp
 from googleapiclient.errors import HttpError
 
 from . import db
-from .models import ActionPreview, ActionResult, Decision, Sender
+from .models import DONE_STATUSES, ActionPreview, ActionResult, Sender
+from .unsubscribe import UnsubContext, plan_chain, unsubscribe
 
 logger = logging.getLogger(__name__)
 
-_ONE_CLICK_TIMEOUT = aiohttp.ClientTimeout(total=15)
-_MAX_TRASH_BATCH = 50
+_MODIFY_CHUNK = 1000  # batchModify limit
+_TRANSACTIONAL_LABEL = "MailCull/Transactional"
 
 
 class ActionExecutor:
-    def __init__(self, gmail_service: Any, dry_run: bool) -> None:
+    def __init__(
+        self,
+        gmail_service: Any,
+        dry_run: bool,
+        granted_scopes: list[str] | None = None,
+        account_email: str | None = None,
+        browser: Any = None,
+        browser_available: bool = False,
+        mute_action: str = "archive",
+        snooze_days: int = 30,
+    ) -> None:
         self._svc = gmail_service
         self._dry_run = dry_run
+        self._unsub_ctx = UnsubContext(
+            gmail_service=gmail_service,
+            dry_run=dry_run,
+            granted_scopes=granted_scopes or [],
+            account_email=account_email,
+            browser=browser,
+            browser_available=browser_available,
+        )
+        self._mute_action = mute_action
+        self._snooze_days = snooze_days
 
     # ── Preview ───────────────────────────────────────────────────────────────
 
     @staticmethod
-    def preview(senders: list[Sender]) -> list[ActionPreview]:
+    def preview(
+        senders: list[Sender], can_send: bool = True, browser_available: bool = True,
+    ) -> list[ActionPreview]:
         results: list[ActionPreview] = []
         for s in senders:
-            method, description, can_automate, needs_manual = _plan_action(s)
+            method, description, can_automate, needs_manual = _plan_action(s, can_send, browser_available)
             results.append(
                 ActionPreview(
                     sender_id=s.id,
@@ -55,246 +75,242 @@ class ActionExecutor:
 
     # ── Execute ───────────────────────────────────────────────────────────────
 
-    async def execute(self, senders: list[Sender]) -> list[ActionResult]:
+    async def execute(self, senders: list[Sender], force: bool = False) -> list[ActionResult]:
         results: list[ActionResult] = []
         for s in senders:
-            result = await self._execute_one(s)
-            results.append(result)
-            await db.update_sender_status(s.id, result.status)
-            await db.log_action(
+            if not force and s.status in DONE_STATUSES:
+                results.append(_skipped(s))
+                continue
+            try:
+                result, extra, undo = await self._execute_one(s)
+            except Exception as exc:  # never let one sender abort the batch
+                logger.exception("Action failed for %s", s.from_address)
+                result, extra, undo = _err(s, s.decision or "unknown", str(exc)[:200]), {}, None
+
+            action_id = await db.log_action(
                 sender_id=s.id,
                 action=s.decision or "none",
                 method=result.method,
                 result=result.detail,
                 dry_run=self._dry_run,
+                http_status=result.http_status,
+                undo_data=undo,
             )
+            result.action_id = action_id
+            result.can_undo = result.can_undo and undo is not None and not self._dry_run
+            if not self._dry_run:
+                await db.update_sender_status(s.id, result.status, **extra)
+            results.append(result)
         return results
 
-    async def _execute_one(self, sender: Sender) -> ActionResult:
-        decision = sender.decision
-        if decision == "keep":
-            return _ok(sender, "keep", "no-op", "no action", can_undo=False)
-        if decision == "transactional":
-            return _ok(sender, "label", "tagged", "tagged + kept", can_undo=False)
-        if decision == "snooze":
-            return _ok(sender, "local", "snoozed", "snoozed", can_undo=False)
-        if decision == "unsubscribe":
+    async def _execute_one(self, sender: Sender) -> tuple[ActionResult, dict, dict | None]:
+        d = sender.decision
+        if d == "keep":
+            return _ok(sender, "no-op", "kept", "no action"), {}, None
+        if d == "transactional":
+            return await self._label_transactional(sender)
+        if d == "snooze":
+            until = (date.today() + timedelta(days=self._snooze_days)).isoformat()
+            return _ok(sender, "local", "snoozed", f"hidden until {until}"), {"snooze_until": until}, None
+        if d == "unsubscribe":
             return await self._unsubscribe(sender)
-        if decision == "mute":
+        if d == "mute":
             return await self._mute(sender)
-        if decision == "archive":
+        if d == "archive":
             return await self._archive(sender)
-        if decision == "delete":
+        if d == "delete":
             return await self._delete(sender)
-        return _err(sender, "unknown", f"Unknown decision: {decision}")
+        return _err(sender, "unknown", f"Unknown decision: {d}"), {}, None
 
     # ── Unsubscribe ───────────────────────────────────────────────────────────
 
-    async def _unsubscribe(self, sender: Sender) -> ActionResult:
-        cap = sender.capability
-        links = sender.unsubscribe_links
-
-        if cap == "one_click":
-            https_links = [l for l in links if l.startswith("https://")]
-            if not https_links:
-                return _err(sender, "one_click", "No HTTPS link for one-click")
-            target = https_links[0]
-            if self._dry_run:
-                return _ok(sender, "one_click", "unsubscribed", f"DRY RUN POST {target}", can_undo=True)
-            return await self._http_post_unsubscribe(sender, target)
-
-        if cap == "link":
-            target = next((l for l in links if l.startswith("http")), links[0] if links else "")
-            return ActionResult(
-                sender_id=sender.id,
-                from_name=sender.from_name,
-                from_address=sender.from_address,
-                decision="unsubscribe",
-                method="link",
-                status="needs_link",
-                detail=target,
-                can_undo=False,
-                link=target,
-            )
-
-        if cap == "mailto":
-            mailto = next((l for l in links if l.startswith("mailto:")), None)
-            if not mailto:
-                return _err(sender, "mailto", "No mailto link found")
-            if self._dry_run:
-                return _ok(sender, "mailto", "unsubscribed", f"DRY RUN mailto {mailto}", can_undo=True)
-            return await self._send_mailto(sender, mailto)
-
-        # capability == "none" — should have been caught at preview but handle gracefully
-        return _err(sender, "none", "No unsubscribe path — use Mute instead")
-
-    async def _http_post_unsubscribe(self, sender: Sender, url: str) -> ActionResult:
-        try:
-            async with aiohttp.ClientSession(timeout=_ONE_CLICK_TIMEOUT) as session:
-                async with session.post(
-                    url,
-                    data="List-Unsubscribe=One-Click",
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
-                    allow_redirects=True,
-                ) as resp:
-                    status = resp.status
-                    if status < 400:
-                        return _ok(
-                            sender, "one_click", "unsubscribed",
-                            f"POST {status}", can_undo=True,
-                        )
-                    return _err(sender, "one_click", f"HTTP {status}", http_status=status)
-        except asyncio.TimeoutError:
-            return _err(sender, "one_click", "Timeout")
-        except Exception as exc:
-            return _err(sender, "one_click", str(exc))
-
-    async def _send_mailto(self, sender: Sender, mailto: str) -> ActionResult:
-        """Send a mailto unsubscribe via Gmail API (requires gmail.send scope)."""
-        try:
-            parsed = urlparse(mailto)
-            to_addr = parsed.path
-            params = parse_qs(parsed.query)
-            subject = params.get("subject", ["Unsubscribe"])[0]
-            body = params.get("body", ["Please unsubscribe me."])[0]
-
-            import base64
-            from email.mime.text import MIMEText
-            msg = MIMEText(body)
-            msg["To"] = to_addr
-            msg["Subject"] = subject
-            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-
-            await asyncio.to_thread(
-                self._svc.users().messages().send(
-                    userId="me", body={"raw": raw}
-                ).execute
-            )
-            return _ok(sender, "mailto", "unsubscribed", f"Email sent to {to_addr}", can_undo=False)
-        except HttpError as exc:
-            if exc.status_code == 403:
-                return _err(sender, "mailto", "gmail.send scope not granted")
-            return _err(sender, "mailto", str(exc))
-        except Exception as exc:
-            return _err(sender, "mailto", str(exc))
+    async def _unsubscribe(self, sender: Sender) -> tuple[ActionResult, dict, dict | None]:
+        out = await unsubscribe(sender, self._unsub_ctx)
+        result = ActionResult(
+            sender_id=sender.id,
+            from_name=sender.from_name,
+            from_address=sender.from_address,
+            decision="unsubscribe",
+            method=out.method,
+            status=out.status,
+            detail=out.detail,
+            can_undo=False,
+            link=out.link if out.status in ("needs_link", "unsub_pending") else None,
+            error=out.detail if out.status == "failed" else None,
+            http_status=out.http_status,
+            attempts=out.attempts,
+        )
+        extra: dict = {}
+        if out.status in ("unsubscribed", "unsub_pending"):
+            extra = {"unsubscribed_at": db.utcnow_iso(), "unsub_method": out.method}
+        return result, extra, None
 
     # ── Mute ─────────────────────────────────────────────────────────────────
 
-    async def _mute(self, sender: Sender, mute_action: str = "archive") -> ActionResult:
-        """Create a Gmail filter that archives or trashes future mail from this sender."""
+    async def _mute(self, sender: Sender) -> tuple[ActionResult, dict, dict | None]:
+        """Create a Gmail filter that archives (or trashes) future mail from this sender."""
+        verb = "trash" if self._mute_action == "trash" else "skip inbox"
         if self._dry_run:
-            return _ok(
-                sender, "filter", "muted",
-                f"DRY RUN: filter from:{sender.domain}", can_undo=True,
-            )
+            return _ok(sender, "filter", "muted", f"DRY RUN: filter from:{sender.from_address} → {verb}"), {}, None
+        action_body = (
+            {"addLabelIds": ["TRASH"]} if self._mute_action == "trash"
+            else {"removeLabelIds": ["INBOX"]}
+        )
+        filter_body = {"criteria": {"from": sender.from_address}, "action": action_body}
         try:
-            criteria = {"from": sender.from_address}
-            action_body: dict = {}
-            if mute_action == "trash":
-                action_body = {"addLabelIds": ["TRASH"]}
-            else:
-                action_body = {"removeLabelIds": ["INBOX"]}
-
-            filter_body = {"criteria": criteria, "action": action_body}
-            await asyncio.to_thread(
-                self._svc.users().settings().filters().create(
-                    userId="me", body=filter_body
-                ).execute
-            )
-            return _ok(
-                sender, "filter", "muted",
-                f"filter: from:{sender.from_address}", can_undo=True,
+            created = await asyncio.to_thread(
+                self._svc.users().settings().filters().create(userId="me", body=filter_body).execute
             )
         except HttpError as exc:
-            return _err(sender, "filter", f"Filter create failed: {exc}")
-        except Exception as exc:
-            return _err(sender, "filter", str(exc))
+            if exc.status_code == 400 and "exists" in str(exc).lower():
+                return _ok(sender, "filter", "muted", f"filter already exists: from:{sender.from_address}"), {}, None
+            return _err(sender, "filter", f"Filter create failed: {_api_msg(exc)}"), {}, None
+        result = _ok(sender, "filter", "muted", f"filter: from:{sender.from_address} → {verb}", can_undo=True)
+        return result, {}, {"filter_id": created.get("id")}
 
     # ── Archive ───────────────────────────────────────────────────────────────
 
-    async def _archive(self, sender: Sender) -> ActionResult:
-        """Remove INBOX label from all messages — moves to All Mail."""
+    async def _archive(self, sender: Sender) -> tuple[ActionResult, dict, dict | None]:
+        """Remove INBOX label from every message — moves to All Mail."""
         if self._dry_run:
-            return _ok(
-                sender, "archive", "archived",
-                f"DRY RUN: archive {sender.message_count} messages", can_undo=True,
-            )
+            return _ok(sender, "archive", "archived", f"DRY RUN: archive inbox mail from {sender.from_address}"), {}, None
         try:
-            resp = await asyncio.to_thread(
-                self._svc.users().messages().list(
-                    userId="me", q=f"from:{sender.from_address} in:inbox", maxResults=500
-                ).execute
-            )
-            ids = [m["id"] for m in resp.get("messages", [])]
+            ids = await self._list_ids(f"from:{sender.from_address} in:inbox")
             if not ids:
-                return _ok(sender, "archive", "archived", "no inbox messages found", can_undo=False)
-
-            for i in range(0, len(ids), _MAX_TRASH_BATCH):
-                chunk = ids[i : i + _MAX_TRASH_BATCH]
-                await asyncio.to_thread(
-                    self._svc.users().messages().batchModify(
-                        userId="me", body={"ids": chunk, "removeLabelIds": ["INBOX"]}
-                    ).execute
-                )
-
-            return _ok(sender, "archive", "archived", f"{len(ids)} → Archive", can_undo=True)
+                return _ok(sender, "archive", "archived", "no inbox messages found"), {}, None
+            await self._batch_modify(ids, remove=["INBOX"])
         except HttpError as exc:
-            return _err(sender, "archive", f"API error: {exc}")
-        except Exception as exc:
-            return _err(sender, "archive", str(exc))
+            return _err(sender, "archive", f"API error: {_api_msg(exc)}"), {}, None
+        return (
+            _ok(sender, "archive", "archived", f"{len(ids):,} → Archive", can_undo=True),
+            {},
+            {"message_ids": ids},
+        )
 
     # ── Delete ────────────────────────────────────────────────────────────────
 
-    async def _delete(self, sender: Sender) -> ActionResult:
-        """Trash (or permanently delete) all messages from this sender."""
+    async def _delete(self, sender: Sender) -> tuple[ActionResult, dict, dict | None]:
+        """Move every message from this sender to Trash (recoverable for 30 days)."""
         if self._dry_run:
-            return _ok(
-                sender, "trash", "deleted",
-                f"DRY RUN: trash {sender.message_count} messages", can_undo=True,
-            )
+            return _ok(sender, "trash", "deleted", f"DRY RUN: trash ~{sender.message_count:,} messages"), {}, None
         try:
-            # Fetch IDs for messages from this sender
-            query = f"from:{sender.from_address}"
-            resp = await asyncio.to_thread(
-                self._svc.users().messages().list(
-                    userId="me", q=query, maxResults=500
-                ).execute
-            )
-            ids = [m["id"] for m in resp.get("messages", [])]
+            ids = await self._list_ids(f"from:{sender.from_address}")
             if not ids:
-                return _ok(sender, "trash", "deleted", "no messages found", can_undo=False)
-
-            # Batch trash in chunks
-            count = 0
-            for i in range(0, len(ids), _MAX_TRASH_BATCH):
-                chunk = ids[i : i + _MAX_TRASH_BATCH]
-                body = {"ids": chunk, "addLabelIds": ["TRASH"]}
-                await asyncio.to_thread(
-                    self._svc.users().messages().batchModify(
-                        userId="me", body=body
-                    ).execute
-                )
-                count += len(chunk)
-
-            return _ok(
-                sender, "trash", "deleted",
-                f"{count} → Trash", can_undo=True,
-            )
+                return _ok(sender, "trash", "deleted", "no messages found"), {}, None
+            await self._batch_modify(ids, add=["TRASH"])
         except HttpError as exc:
-            return _err(sender, "trash", f"API error: {exc}")
-        except Exception as exc:
-            return _err(sender, "trash", str(exc))
+            return _err(sender, "trash", f"API error: {_api_msg(exc)}"), {}, None
+        return (
+            _ok(sender, "trash", "deleted", f"{len(ids):,} → Trash", can_undo=True),
+            {},
+            {"message_ids": ids},
+        )
+
+    # ── Transactional label ───────────────────────────────────────────────────
+
+    async def _label_transactional(self, sender: Sender) -> tuple[ActionResult, dict, dict | None]:
+        if self._dry_run:
+            return _ok(sender, "label", "transactional", f"DRY RUN: label {_TRANSACTIONAL_LABEL}"), {}, None
+        try:
+            label_id = await self._ensure_label(_TRANSACTIONAL_LABEL)
+            ids = await self._list_ids(f"from:{sender.from_address}")
+            if ids:
+                await self._batch_modify(ids, add=[label_id])
+        except HttpError as exc:
+            return _err(sender, "label", f"API error: {_api_msg(exc)}"), {}, None
+        return (
+            _ok(sender, "label", "transactional", f"{len(ids):,} labelled {_TRANSACTIONAL_LABEL}", can_undo=bool(ids)),
+            {},
+            {"message_ids": ids, "label_id": label_id} if ids else None,
+        )
+
+    # ── Undo ──────────────────────────────────────────────────────────────────
+
+    async def undo(self, action_id: int) -> str:
+        entry = await db.get_action(action_id)
+        if entry is None:
+            raise ValueError("Action not found")
+        if entry.undone:
+            raise ValueError("Already undone")
+        if entry.dry_run or not entry.undo_data:
+            raise ValueError("This action can't be undone")
+        data = entry.undo_data
+        if entry.action == "mute":
+            await asyncio.to_thread(
+                self._svc.users().settings().filters().delete(userId="me", id=data["filter_id"]).execute
+            )
+            detail = "filter removed"
+        elif entry.action == "archive":
+            await self._batch_modify(data["message_ids"], add=["INBOX"])
+            detail = f"{len(data['message_ids']):,} moved back to Inbox"
+        elif entry.action == "delete":
+            await self._batch_untrash(data["message_ids"])
+            detail = f"{len(data['message_ids']):,} restored from Trash"
+        elif entry.action == "transactional":
+            await self._batch_modify(data["message_ids"], remove=[data["label_id"]])
+            detail = "label removed"
+        else:
+            raise ValueError("This action can't be undone")
+        await db.mark_action_undone(action_id)
+        await db.update_sender_status(entry.sender_id, "pending")
+        await db.update_sender_decision(entry.sender_id, None)
+        return detail
+
+    # ── Gmail helpers ─────────────────────────────────────────────────────────
+
+    async def _list_ids(self, query: str) -> list[str]:
+        ids: list[str] = []
+        page_token: str | None = None
+        while True:
+            kwargs: dict = {"userId": "me", "q": query, "maxResults": 500, "includeSpamTrash": False}
+            if page_token:
+                kwargs["pageToken"] = page_token
+            resp = await asyncio.to_thread(self._svc.users().messages().list(**kwargs).execute)
+            ids.extend(m["id"] for m in resp.get("messages", []))
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                return ids
+
+    async def _batch_modify(self, ids: list[str], add: list[str] | None = None, remove: list[str] | None = None) -> None:
+        for i in range(0, len(ids), _MODIFY_CHUNK):
+            body: dict = {"ids": ids[i : i + _MODIFY_CHUNK]}
+            if add:
+                body["addLabelIds"] = add
+            if remove:
+                body["removeLabelIds"] = remove
+            await asyncio.to_thread(self._svc.users().messages().batchModify(userId="me", body=body).execute)
+
+    async def _batch_untrash(self, ids: list[str]) -> None:
+        # messages.untrash restores each message's previous labels
+        for i in range(0, len(ids), 100):
+            batch = self._svc.new_batch_http_request()
+            for mid in ids[i : i + 100]:
+                batch.add(self._svc.users().messages().untrash(userId="me", id=mid))
+            await asyncio.to_thread(batch.execute)
+
+    async def _ensure_label(self, name: str) -> str:
+        resp = await asyncio.to_thread(self._svc.users().labels().list(userId="me").execute)
+        for label in resp.get("labels", []):
+            if label.get("name") == name:
+                return label["id"]
+        created = await asyncio.to_thread(
+            self._svc.users().labels().create(
+                userId="me",
+                body={"name": name, "labelListVisibility": "labelShow", "messageListVisibility": "show"},
+            ).execute
+        )
+        return created["id"]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _plan_action(s: Sender) -> tuple[str, str, bool, bool]:
+def _plan_action(s: Sender, can_send: bool = True, browser_available: bool = True) -> tuple[str, str, bool, bool]:
     """Return (method, description, can_automate, needs_manual)."""
     d = s.decision
     if d == "keep":
         return "no-op", "No action taken", True, False
     if d == "transactional":
-        return "label", "Tagged as transactional and kept", True, False
+        return "label", f"Label existing mail {_TRANSACTIONAL_LABEL} and keep", True, False
     if d == "snooze":
         return "local", "Snoozed — will re-surface later", True, False
     if d == "mute":
@@ -302,28 +318,27 @@ def _plan_action(s: Sender) -> tuple[str, str, bool, bool]:
     if d == "archive":
         return "archive", f"Archive inbox messages from {s.from_address}", True, False
     if d == "delete":
-        return "trash", f"Trash {s.message_count} messages from {s.from_address}", True, False
+        return "trash", f"Trash all messages from {s.from_address}", True, False
     if d == "unsubscribe":
-        cap = s.capability
-        if cap == "one_click":
-            return "one_click", "POST to List-Unsubscribe-Post endpoint", True, False
-        if cap == "link":
-            link = s.unsubscribe_links[0] if s.unsubscribe_links else "unknown"
-            return "link", f"Open {link} and complete manually", False, True
-        if cap == "mailto":
-            return "mailto", "Send unsubscribe email via Gmail API", True, False
-        return "none", "No unsubscribe path — use Mute", False, False
+        steps = plan_chain(s, can_send, browser_available)
+        if not steps:
+            return "none", "No unsubscribe method found — use Mute", False, False
+        # A plain GET ("check …") only occasionally completes an opt-out, so it doesn't count
+        automated = [
+            x for x in steps
+            if x != "manual link" and "needs gmail.send" not in x and not x.startswith("check ")
+        ]
+        method = (
+            "one_click" if s.one_click_url
+            else "mailto" if s.mailto_links and can_send
+            else "browser" if browser_available and automated
+            else "link"
+        )
+        return method, " → ".join(steps), bool(automated), not automated
     return "none", "No action", False, False
 
 
-def _ok(
-    sender: Sender,
-    method: str,
-    status: str,
-    detail: str,
-    can_undo: bool,
-    http_status: int | None = None,
-) -> ActionResult:
+def _ok(sender: Sender, method: str, status: str, detail: str, can_undo: bool = False) -> ActionResult:
     return ActionResult(
         sender_id=sender.id,
         from_name=sender.from_name,
@@ -336,12 +351,7 @@ def _ok(
     )
 
 
-def _err(
-    sender: Sender,
-    method: str,
-    error: str,
-    http_status: int | None = None,
-) -> ActionResult:
+def _err(sender: Sender, method: str, error: str) -> ActionResult:
     return ActionResult(
         sender_id=sender.id,
         from_name=sender.from_name,
@@ -353,3 +363,24 @@ def _err(
         can_undo=False,
         error=error,
     )
+
+
+def _skipped(sender: Sender) -> ActionResult:
+    return ActionResult(
+        sender_id=sender.id,
+        from_name=sender.from_name,
+        from_address=sender.from_address,
+        decision=sender.decision,
+        method="skip",
+        status=sender.status,
+        detail=f"already {sender.status.replace('_', ' ')} — skipped",
+        can_undo=False,
+        skipped=True,
+    )
+
+
+def _api_msg(exc: HttpError) -> str:
+    try:
+        return exc.reason or str(exc)
+    except Exception:
+        return str(exc)

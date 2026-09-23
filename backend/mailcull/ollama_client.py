@@ -71,6 +71,21 @@ class OllamaClient:
         self._model = model
         self._reachable: bool | None = None
 
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    def configure(self, base_url: str | None = None, model: str | None = None) -> None:
+        if base_url is not None:
+            self._base_url = base_url.rstrip("/")
+            self._reachable = None
+        if model is not None:
+            self._model = model
+
     async def check_reachable(self) -> bool:
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:

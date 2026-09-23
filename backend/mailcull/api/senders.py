@@ -16,11 +16,13 @@ async def list_senders(
     category: str | None = None,
     capability: str | None = None,
     decision: str | None = None,
+    status: str | None = None,
 ):
     return await db.get_all_senders(
         category=category,
         capability=capability,
         decision=decision,
+        status=status,
         sort=sort,
     )
 
@@ -50,10 +52,7 @@ async def classify_senders(body: ClassifyRequest | None = None):
 
     ollama = get_ollama()
     enriched, degraded = await ollama.classify_senders(senders)
-
-    scan = await db.get_latest_scan()
-    scan_id = scan.id if scan else 0
-    await db.bulk_upsert_senders(enriched, scan_id)
+    await db.update_classifications(enriched)
     return {"classified": len(enriched), "degraded": degraded}
 
 
@@ -67,3 +66,17 @@ async def set_decisions(items: list[DecisionItem]):
     for item in items:
         await db.update_sender_decision(item.sender_id, item.decision)
     return {"updated": len(items)}
+
+
+@router.post("/{sender_id}/manual-done", response_model=Sender)
+async def mark_manual_unsubscribe(sender_id: str):
+    """The user finished a link unsubscribe by hand; track it like any other."""
+    s = await db.get_sender(sender_id)
+    if not s:
+        raise HTTPException(404, "Sender not found")
+    await db.update_sender_status(
+        sender_id, "unsubscribed", unsubscribed_at=db.utcnow_iso(), unsub_method="manual",
+    )
+    await db.log_action(sender_id=sender_id, action="unsubscribe", method="manual",
+                        result="marked done by user", dry_run=False)
+    return await db.get_sender(sender_id)

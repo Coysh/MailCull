@@ -1,7 +1,14 @@
-export type Capability = 'one_click' | 'link' | 'mailto' | 'none';
+export type Capability = 'one_click' | 'mailto' | 'link' | 'body_link' | 'none';
 export type Category = 'Marketing' | 'Newsletter' | 'Transactional' | 'Social' | 'Spam' | 'Personal';
 export type Decision = 'keep' | 'unsubscribe' | 'mute' | 'delete' | 'archive' | 'transactional' | 'snooze' | null;
-export type Status = 'pending' | 'kept' | 'unsubscribed' | 'needs_link' | 'muted' | 'deleted' | 'archived' | 'snoozed' | 'failed' | 'transactional';
+export type Status =
+  | 'pending' | 'kept' | 'unsubscribed' | 'unsub_pending' | 'still_sending' | 'needs_link'
+  | 'muted' | 'deleted' | 'archived' | 'snoozed' | 'failed' | 'transactional';
+
+/** Already handled — hidden from the default review list and skipped on execute. */
+export const DONE_STATUSES: ReadonlySet<Status> = new Set<Status>([
+  'kept', 'unsubscribed', 'unsub_pending', 'muted', 'deleted', 'archived', 'transactional', 'snoozed',
+]);
 
 export interface Sender {
   id: string;
@@ -14,12 +21,19 @@ export interface Sender {
   sample_subjects: string[];
   capability: Capability;
   unsubscribe_links: string[];
+  one_click_url: string | null;
+  mailto_links: string[];
+  http_links: string[];
+  unsubscribe_source: 'header' | 'body' | null;
   category: Category | null;
   rationale: string | null;
   suggested_action: Decision;
   classification_degraded: boolean;
   decision: Decision;
   status: Status;
+  unsubscribed_at: string | null;
+  unsub_method: string | null;
+  snooze_until: string | null;
 }
 
 export interface ScanStatus {
@@ -39,6 +53,7 @@ export interface AuthStatus {
   connected: boolean;
   account: string | null;
   scopes: string[];
+  missing_scopes?: string[];
 }
 
 export interface ActionPreview {
@@ -63,6 +78,10 @@ export interface ActionResult {
   can_undo: boolean;
   link: string | null;
   error: string | null;
+  http_status: number | null;
+  attempts: string[];
+  action_id: number | null;
+  skipped: boolean;
 }
 
 export type Screen = 'not_connected' | 'review' | 'scanning' | 'confirm' | 'results' | 'settings';

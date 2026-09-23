@@ -1,7 +1,7 @@
 import React, { useEffect, useCallback } from 'react';
-import { C, CAT_COLORS, CAP_COLORS, CAP_LABELS, DEC_LABELS } from './tokens';
+import { C, CAT_COLORS, CAP_COLORS, CAP_LABELS, DEC_LABELS, STATUS_META } from './tokens';
 import { useStore } from '../store';
-import type { Sender, Decision, Capability } from '../types';
+import type { Sender, Decision } from '../types';
 import * as api from '../api';
 
 export function ReviewView() {
@@ -44,6 +44,13 @@ export function ReviewView() {
     return () => document.removeEventListener('keydown', handler);
   }, [state.focusedIdx, state.expandedId, state.screen, filtered, decide, dispatch]);
 
+  const stillSending = state.senders.filter(s => s.status === 'still_sending');
+  const muteStillSending = () => {
+    const ids = stillSending.map(s => s.id);
+    dispatch({ type: 'BULK_DECIDE', ids, decision: 'mute' });
+    api.postDecisions(ids.map(id => ({ sender_id: id, decision: 'mute' as Decision }))).catch(console.error);
+  };
+
   const allSelected = filtered.length > 0 && filtered.every(s => state.selectedIds.has(s.id));
 
   const toggleSelectAll = () => {
@@ -67,7 +74,8 @@ export function ReviewView() {
         <div style={{ width: 1, height: 15, background: C.border, margin: '0 3px' }} />
 
         <SelectEl value={state.filterCategory} onChange={v => dispatch({ type: 'SET_FILTER_CATEGORY', v })} options={[['all', 'All categories'], ['Marketing', 'Marketing'], ['Newsletter', 'Newsletter'], ['Transactional', 'Transactional'], ['Social', 'Social'], ['Spam', 'Spam'], ['Personal', 'Personal']]} />
-        <SelectEl value={state.filterCapability} onChange={v => dispatch({ type: 'SET_FILTER_CAPABILITY', v })} options={[['all', 'All capabilities'], ['one_click', 'One-click'], ['link', 'Needs link'], ['mailto', 'Mailto'], ['none', 'Not possible']]} />
+        <SelectEl value={state.filterStatus} onChange={v => dispatch({ type: 'SET_FILTER_STATUS', v })} options={[['active', 'To do'], ['still_sending', 'Still sending'], ['needs_link', 'Needs link'], ['failed', 'Failed'], ['done', 'Done'], ['all', 'All statuses']]} />
+        <SelectEl value={state.filterCapability} onChange={v => dispatch({ type: 'SET_FILTER_CAPABILITY', v })} options={[['all', 'All capabilities'], ['one_click', 'One-click'], ['mailto', 'Mailto'], ['link', 'Web page'], ['body_link', 'Link in body'], ['none', 'Not possible']]} />
         <SelectEl value={state.filterDecision} onChange={v => dispatch({ type: 'SET_FILTER_DECISION', v })} options={[['all', 'All decisions'], ['undecided', 'Undecided'], ['keep', 'Keep'], ['unsubscribe', 'Unsubscribe'], ['mute', 'Mute'], ['archive', 'Archive'], ['delete', 'Delete']]} />
 
         <div style={{ flex: 1 }} />
@@ -95,6 +103,24 @@ export function ReviewView() {
         )}
       </div>
 
+      {stillSending.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: C.redBg, borderBottom: `1px solid ${C.redBorder}`, padding: '7px 14px', flexShrink: 0 }}>
+          <span style={{ width: 6, height: 6, borderRadius: '50%', background: C.redBright }} />
+          <span style={{ fontSize: 12, fontWeight: 600, color: C.redBright }}>
+            {stillSending.length} sender{stillSending.length !== 1 ? 's' : ''} still sending
+          </span>
+          <span style={{ fontSize: 12, color: C.redText }}>
+            Mail arrived more than {state.settings.graceDays} days after you unsubscribed. A Gmail filter will keep them out of your inbox.
+          </span>
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+            <button onClick={() => dispatch({ type: 'SET_FILTER_STATUS', v: 'still_sending' })}
+              style={{ background: 'transparent', border: `1px solid ${C.redBorder}`, color: C.redText, fontSize: 11, padding: '3px 9px', borderRadius: 2, cursor: 'pointer' }}>Show</button>
+            <button onClick={muteStillSending}
+              style={{ background: C.redBg, border: `1px solid ${C.redBright}`, color: C.redBright, fontSize: 11, fontWeight: 600, padding: '3px 9px', borderRadius: 2, cursor: 'pointer' }}>Mute all</button>
+          </div>
+        </div>
+      )}
+
       {/* Table header */}
       <div style={{ display: 'grid', gridTemplateColumns: '34px minmax(220px,1fr) 66px 78px 86px 108px 108px 96px 224px', alignItems: 'center', height: 30, background: '#101216', borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
         <div style={{ display: 'flex', justifyContent: 'center' }}>
@@ -119,7 +145,7 @@ export function ReviewView() {
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '60px 20px', gap: 10 }}>
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#31353D" strokeWidth="1.4" strokeLinecap="round"><circle cx="10" cy="10" r="7" /><line x1="15" y1="15" x2="21" y2="21" /></svg>
             <div style={{ fontSize: 13, color: C.textFaint }}>No senders match this filter</div>
-            <button onClick={() => { dispatch({ type: 'SET_FILTER_CATEGORY', v: 'all' }); dispatch({ type: 'SET_FILTER_CAPABILITY', v: 'all' }); dispatch({ type: 'SET_FILTER_DECISION', v: 'all' }); }}
+            <button onClick={() => { dispatch({ type: 'SET_FILTER_CATEGORY', v: 'all' }); dispatch({ type: 'SET_FILTER_CAPABILITY', v: 'all' }); dispatch({ type: 'SET_FILTER_DECISION', v: 'all' }); dispatch({ type: 'SET_FILTER_STATUS', v: 'all' }); }}
               style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.textMuted, fontSize: 11, padding: '5px 12px', borderRadius: 2, cursor: 'pointer' }}>Clear filters</button>
           </div>
         )}
@@ -194,7 +220,10 @@ function SenderRow({ sender: s, index, focused, onDecide }: { sender: Sender; in
             <path d="M3.5 2 L7 5 L3.5 8" />
           </svg>
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 12.5, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.from_name}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+              <span style={{ fontSize: 12.5, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.from_name}</span>
+              {s.status !== 'pending' && <StatusPill status={s.status} />}
+            </div>
             <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: C.textDim, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.from_address}</div>
           </div>
         </div>
@@ -224,7 +253,7 @@ function SenderRow({ sender: s, index, focused, onDecide }: { sender: Sender; in
 }
 
 function ExpandedRow({ sender: s, onDecide }: { sender: Sender; onDecide: (id: string, d: Decision) => void }) {
-  const { dispatch } = useStore();
+  const { state } = useStore();
   const [capColor, capBg] = CAP_COLORS[s.capability] ?? [C.textFaint, C.panel2];
 
   const pill = (action: Decision, label: string, color: string, bg: string, bd: string) => {
@@ -240,11 +269,17 @@ function ExpandedRow({ sender: s, onDecide }: { sender: Sender; onDecide: (id: s
   };
 
   const capDetails: Record<string, string> = {
-    one_click: 'A POST is sent to the List-Unsubscribe-Post endpoint. No email is opened, nothing is shown to the sender beyond the standard opt-out.',
-    link: 'Opt-out is a hosted web page. MailCull cannot complete this automatically — you open the link and finish the flow, then mark it done.',
-    mailto: 'A plain-text unsubscribe email is sent from your account to the listed address. Delivery is best-effort.',
-    none: 'No List-Unsubscribe header or link was found in any sampled message. Use Mute to stop future mail.',
+    one_click: 'Sends the standard one-click opt-out (RFC 8058). If that\'s refused, MailCull tries the other methods below in order.',
+    mailto: 'Sends an unsubscribe email from your account to the listed address, then tries the web page if there is one.',
+    link: 'Opens the unsubscribe page in a hidden browser and clicks the opt-out button. If it can\'t, you finish it by hand.',
+    body_link: 'No unsubscribe header. MailCull found this link in the newest email and opens it in a hidden browser.',
+    none: 'No unsubscribe header or link was found in the newest email. Use Mute to stop future mail.',
   };
+  const methods: [string, string][] = [
+    ...(s.one_click_url ? [['one-click', s.one_click_url] as [string, string]] : []),
+    ...s.mailto_links.slice(0, 1).map(l => ['mailto', l] as [string, string]),
+    ...s.http_links.slice(0, 2).map(l => [s.unsubscribe_source === 'body' ? 'body link' : 'web page', l] as [string, string]),
+  ];
 
   return (
     <div style={{ background: '#101319', borderTop: `1px solid ${C.borderSub}`, padding: '13px 16px 15px 56px', display: 'grid', gridTemplateColumns: '1fr 300px', gap: 22, animation: 'fadeIn .14s ease' }}>
@@ -265,7 +300,7 @@ function ExpandedRow({ sender: s, onDecide }: { sender: Sender; onDecide: (id: s
         {s.rationale && <div style={{ fontSize: 12, color: '#8990A0', lineHeight: 1.55, fontStyle: 'italic' }}>"{s.rationale}"</div>}
         <div style={{ display: 'flex', gap: 6, marginTop: 13 }}>
           {pill('transactional', 'Mark transactional', C.blue, C.blueBg, '#264a7a')}
-          {pill('snooze', 'Snooze 30d', '#C3C8D0', C.panel2, '#3A3F47')}
+          {pill('snooze', `Snooze ${state.settings.snoozeDays}d`, '#C3C8D0', C.panel2, '#3A3F47')}
           {s.decision && (
             <button onClick={() => onDecide(s.id, null)} style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.textDim, fontSize: 11, padding: '4px 9px', borderRadius: 2, cursor: 'pointer' }}>Undo decision</button>
           )}
@@ -281,9 +316,27 @@ function ExpandedRow({ sender: s, onDecide }: { sender: Sender; onDecide: (id: s
             </span>
           </div>
           <div style={{ fontSize: 11, color: C.textFaint, lineHeight: 1.55, marginBottom: 9 }}>{capDetails[s.capability]}</div>
-          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: C.textDimmer, wordBreak: 'break-all', background: C.bg, border: `1px solid ${C.borderSub}`, borderRadius: 2, padding: '6px 8px' }}>
-            {s.unsubscribe_links[0] ?? 'no List-Unsubscribe header found'}
-          </div>
+          {methods.length > 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {methods.map(([kind, url], i) => (
+                <div key={i} style={{ display: 'grid', gridTemplateColumns: '14px 62px 1fr', gap: 6, alignItems: 'baseline', fontFamily: "'JetBrains Mono', monospace", fontSize: 10, background: C.bg, border: `1px solid ${C.borderSub}`, borderRadius: 2, padding: '5px 8px' }}>
+                  <span style={{ color: C.textGhost }}>{i + 1}</span>
+                  <span style={{ color: C.textMuted }}>{kind}</span>
+                  <span title={url} style={{ color: C.textDimmer, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{url}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: C.textDimmer, background: C.bg, border: `1px solid ${C.borderSub}`, borderRadius: 2, padding: '6px 8px' }}>
+              no unsubscribe method found
+            </div>
+          )}
+          {s.unsubscribed_at && (
+            <div style={{ fontSize: 11, color: s.status === 'still_sending' ? C.redBright : C.textFaint, marginTop: 9, lineHeight: 1.5 }}>
+              Unsubscribed {s.unsubscribed_at.slice(0, 10)} via {(s.unsub_method ?? 'unknown').replace('_', '-')}
+              {s.status === 'still_sending' && ` — but mail was still arriving on ${s.last_seen}. Mute to filter it.`}
+            </div>
+          )}
           {s.capability === 'none' && (
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 7, marginTop: 9, paddingTop: 9, borderTop: `1px solid ${C.borderSub}` }}>
               <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke={C.teal} strokeWidth="1.3" style={{ marginTop: 1, flexShrink: 0 }}>
@@ -295,6 +348,13 @@ function ExpandedRow({ sender: s, onDecide }: { sender: Sender; onDecide: (id: s
         </div>
       </div>
     </div>
+  );
+}
+
+function StatusPill({ status }: { status: string }) {
+  const [label, color, bg] = STATUS_META[status] ?? [status, C.textFaint, C.panel2];
+  return (
+    <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 600, padding: '1px 5px', borderRadius: 2, background: bg, color, letterSpacing: '.02em' }}>{label}</span>
   );
 }
 
