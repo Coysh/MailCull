@@ -17,6 +17,7 @@ Existing unsubscribe tools work by reading your email on their servers and sendi
 | Action | How |
 |---|---|
 | **Unsubscribe** | Tries every method the sender offers, in order, until one works: **one-click** POST (RFC 8058) → **mailto** sent from your account → **headless browser** opens the unsubscribe page and clicks the opt-out button → **manual link** as a last resort. Each attempt is shown in Results. |
+| **Inbox** | Browse your inbox newest first and unsubscribe from (or mute) the sender of any email, using that email's own unsubscribe link. |
 | **Unsubscribe verification** | Later scans check whether mail kept arriving more than `UNSUB_GRACE_DAYS` after you unsubscribed. If it did, the sender is flagged **Still sending**, with one-click **Mute all**. |
 | **Mute** | Creates a Gmail filter that archives or trashes future mail from that sender. Works for senders with no unsubscribe header at all. |
 | **Archive / Delete existing mail** | Archives or trashes *all* messages from a sender (paginated, no 500-message cap). **Undo** restores them. |
@@ -415,6 +416,9 @@ mailcull/
 | `POST` | `/api/scan` | Starts a scan, returns `{scan_id}` |
 | `GET` | `/api/scan/{id}` | Scan progress: phase, progress_pct, totals |
 | `GET` | `/api/scan/latest/status` | Most recent scan record |
+| `GET` | `/api/scan/latest/completed` | Most recent scan that finished successfully |
+| `GET` | `/api/inbox` | Inbox messages newest first (`page_token`, `limit`) |
+| `POST` | `/api/inbox/{message_id}/action` | `{action: unsubscribe\|mute, confirm: true}` for that message's sender |
 | `GET` | `/api/senders` | All senders; filterable by `category`, `capability`, `decision`, `status`; sortable by `count`, `sender`, `last` |
 | `POST` | `/api/senders/{id}/manual-done` | Record a manually completed link unsubscribe |
 | `POST` | `/api/senders/classify` | Re-run LLM classification on all (or specified) senders |

@@ -26,6 +26,8 @@ interface State {
   ollamaChecking: boolean;
   scanId: number | null;
   scanStatus: ScanStatus | null;
+  /** Most recent scan that finished successfully (may be older than scanStatus) */
+  lastCompletedScan: ScanStatus | null;
   lastResults: ActionResult[];
   needsLinkDoneIds: Set<string>;
   settings: {
@@ -67,6 +69,7 @@ type Action =
   | { type: 'SET_OLLAMA_UP'; up: boolean; checking?: boolean }
   | { type: 'SET_SCAN_ID'; id: number | null }
   | { type: 'SET_SCAN_STATUS'; status: ScanStatus | null }
+  | { type: 'SET_LAST_COMPLETED_SCAN'; status: ScanStatus | null }
   | { type: 'SET_RESULTS'; results: ActionResult[] }
   | { type: 'TOGGLE_NEEDS_LINK_DONE'; id: string }
   | { type: 'SET_SETTING'; key: keyof State['settings']; value: unknown };
@@ -93,6 +96,7 @@ const initialState: State = {
   ollamaChecking: false,
   scanId: null,
   scanStatus: null,
+  lastCompletedScan: null,
   lastResults: [],
   needsLinkDoneIds: new Set(),
   settings: {
@@ -152,7 +156,9 @@ function reducer(state: State, action: Action): State {
     case 'SET_DRY_RUN': return { ...state, dryRun: action.value };
     case 'SET_OLLAMA_UP': return { ...state, ollamaUp: action.up, ollamaChecking: action.checking ?? false };
     case 'SET_SCAN_ID': return { ...state, scanId: action.id };
-    case 'SET_SCAN_STATUS': return { ...state, scanStatus: action.status };
+    case 'SET_SCAN_STATUS':
+      return { ...state, scanStatus: action.status, ...(action.status?.phase === 'done' ? { lastCompletedScan: action.status } : {}) };
+    case 'SET_LAST_COMPLETED_SCAN': return { ...state, lastCompletedScan: action.status };
     case 'SET_RESULTS': return { ...state, lastResults: action.results };
     case 'TOGGLE_NEEDS_LINK_DONE': {
       const n = new Set(state.needsLinkDoneIds);
@@ -172,7 +178,11 @@ interface Ctx {
   decided: Sender[];
   reloadSenders: () => Promise<void>;
   checkOllama: () => void;
+  startScan: () => Promise<void>;
+  scanRunning: boolean;
 }
+
+export const isScanRunning = (s: ScanStatus | null) => !!s && s.phase !== 'done' && s.phase !== 'error';
 
 const StoreCtx = createContext<Ctx>(null!);
 
@@ -190,6 +200,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       dispatch({ type: 'SET_SENDERS_LOADING', loading: false });
     }
   }, []);
+
+  const scanRunning = isScanRunning(state.scanStatus);
+
+  const startScan = useCallback(async () => {
+    const { scan_id } = await api.postStartScan(state.settings.scanDays);
+    dispatch({ type: 'SET_SCAN_ID', id: scan_id });
+    dispatch({ type: 'SET_SCAN_STATUS', status: await api.getScanStatus(scan_id) });
+  }, [state.settings.scanDays]);
 
   // Checked by the backend: the browser can't reach a LAN Ollama (CORS)
   const checkOllama = useCallback(() => {
@@ -218,7 +236,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   // Load senders when connected and on review screen
   useEffect(() => {
-    if (state.authStatus.connected && (state.screen === 'review' || state.screen === 'confirm' || state.screen === 'results')) {
+    if (state.authStatus.connected && ['review', 'confirm', 'results', 'scanning'].includes(state.screen)) {
       reloadSenders();
     }
   }, [state.authStatus.connected, state.screen, reloadSenders]);
@@ -230,25 +248,30 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     return () => clearInterval(id);
   }, [state.settings.ollamaUrl, checkOllama]);
 
-  // Poll scan status when scanning
+  // Load the most recent scan on connect, and re-attach if one is still running
   useEffect(() => {
-    if (state.screen !== 'scanning' || !state.scanId) return;
+    if (!state.authStatus.connected) return;
+    api.getLastCompletedScan().then(done => dispatch({ type: 'SET_LAST_COMPLETED_SCAN', status: done })).catch(() => {});
+    api.getLatestScan().then(latest => {
+      dispatch({ type: 'SET_SCAN_STATUS', status: latest });
+      if (latest && isScanRunning(latest)) dispatch({ type: 'SET_SCAN_ID', id: latest.id });
+    }).catch(() => {});
+  }, [state.authStatus.connected]);
+
+  // Poll a running scan from any screen (the sidebar shows its progress)
+  useEffect(() => {
+    if (!state.scanId || !scanRunning) return;
     const id = setInterval(() => {
       api.getScanStatus(state.scanId!).then(status => {
         dispatch({ type: 'SET_SCAN_STATUS', status });
-        if (status.phase === 'done') {
-          clearInterval(id);
-          dispatch({ type: 'SET_SCREEN', screen: 'review' });
-        } else if (status.phase === 'error') {
-          clearInterval(id);
-        }
+        if (status.phase === 'done') reloadSenders();
       }).catch(() => {});
     }, 1500);
     return () => clearInterval(id);
-  }, [state.screen, state.scanId]);
+  }, [state.scanId, scanRunning, reloadSenders]);
 
   return (
-    <StoreCtx.Provider value={{ state, dispatch, filtered, decided, reloadSenders, checkOllama }}>
+    <StoreCtx.Provider value={{ state, dispatch, filtered, decided, reloadSenders, checkOllama, startScan, scanRunning }}>
       {children}
     </StoreCtx.Provider>
   );

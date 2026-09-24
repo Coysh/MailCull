@@ -84,5 +84,23 @@ export interface ActionResult {
   skipped: boolean;
 }
 
-export type Screen = 'not_connected' | 'review' | 'scanning' | 'confirm' | 'results' | 'settings';
+export type Screen = 'not_connected' | 'inbox' | 'review' | 'scanning' | 'confirm' | 'results' | 'settings';
+
+export interface InboxMessage {
+  message_id: string;
+  received_at: string;
+  unread: boolean;
+  from_name: string;
+  from_address: string;
+  subject: string;
+  /** Unsubscribe capability advertised by this specific message */
+  capability: Capability;
+  sender_id: string;
+  /** null = sender hasn't been seen by a scan yet */
+  sender_status: Status | null;
+  sender_decision: Decision;
+  message_count: number | null;
+}
+
+export interface InboxPage { messages: InboxMessage[]; next_page_token: string | null; }
 export type SettingsSection = 'connection' | 'scanning' | 'ai' | 'behaviour' | 'data' | 'appearance' | 'danger';

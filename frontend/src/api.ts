@@ -1,4 +1,4 @@
-import type { Sender, ScanStatus, AuthStatus, ActionPreview, ActionResult, Decision } from './types';
+import type { Sender, ScanStatus, AuthStatus, ActionPreview, ActionResult, Decision, InboxPage } from './types';
 
 const BASE = '/api';
 
@@ -21,6 +21,7 @@ export const postStartScan = (since_days?: number) =>
   req<{ scan_id: number }>('/scan', { method: 'POST', body: JSON.stringify({ since_days: since_days ?? null }) });
 export const getScanStatus = (id: number) => req<ScanStatus>(`/scan/${id}`);
 export const getLatestScan = () => req<ScanStatus | null>('/scan/latest/status');
+export const getLastCompletedScan = () => req<ScanStatus | null>('/scan/latest/completed');
 
 // Senders
 export const getSenders = (params?: {
@@ -63,3 +64,11 @@ export const patchSettings = (patch: Partial<Pick<BackendSettings, 'ollama_base_
   req<BackendSettings>('/settings', { method: 'PATCH', body: JSON.stringify(patch) });
 export const getOllamaStatus = () => req<{ reachable: boolean; base_url: string; model: string }>('/settings/ollama-status');
 export const postWipe = () => req<{ status: string }>('/settings/wipe?confirm=true', { method: 'POST' });
+
+// Inbox
+export const getInbox = (page_token?: string | null) =>
+  req<InboxPage>(`/inbox${page_token ? `?page_token=${encodeURIComponent(page_token)}` : ''}`);
+export const postInboxAction = (message_id: string, action: 'unsubscribe' | 'mute', mute_action: 'archive' | 'trash' = 'archive') =>
+  req<ActionResult>(`/inbox/${encodeURIComponent(message_id)}/action`, {
+    method: 'POST', body: JSON.stringify({ action, confirm: true, mute_action }),
+  });

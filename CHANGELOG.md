@@ -6,6 +6,14 @@ All notable changes to MailCull are documented here.
 
 ## [Unreleased]
 
+### Inbox, scan page, favicon
+- **Inbox view.** Lists your inbox newest first, with an unread marker, a filter, and paging for older mail. Each email has **Unsubscribe** and **Mute** buttons, each with a confirm step. Unsubscribe uses *that email's own* unsubscribe link, which is the freshest token available, or looks in the email's body if there's no header. It then runs the full fallback chain. Senders a scan hasn't seen yet are added so the action is tracked.
+- **Scan page no longer auto-starts.** It shows when you last scanned, with message and sender counts, and a time window picker plus **Start scan**. If a scan is already running, the page picks it up instead of starting another. A failed or interrupted scan no longer hides the last completed one.
+- Reading progress uses the real total ("Read 5,892 of 32,879") and no longer sits at 40%. The sidebar shows live scan progress on every page.
+- Removed the "Use partial results" button and the "results streaming in" list. Senders are only saved when a scan finishes, so both were misleading.
+- Added a favicon (the MailCull logo as SVG).
+- Fix: "scanned X ago" was an hour out in BST (UTC timestamps were read as local time).
+
 ### Unsubscribe overhaul
 - **Fallback chain.** Each unsubscribe tries every method the sender offers until one works: one-click POST → mailto → headless browser on the unsubscribe page → plain GET → manual link. Results show each attempt, e.g. `one-click: HTTP 405 → mailto: sent to …`.
 - **Headless browser (Playwright).** Opens link-only unsubscribe pages and clicks the opt-out control. It handles multi-step confirmations and "unsubscribe from all" checkboxes, and fills an empty email field. It never clicks subscribe, keep, cancel or login controls. Optional extra: `pip install ".[browser]"` plus `playwright install chromium`. It's included in the Docker image.

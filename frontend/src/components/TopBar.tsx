@@ -8,7 +8,7 @@ export function TopBar() {
   const missing = state.authStatus.missing_scopes ?? [];
 
   const screenLabels: Record<string, string> = {
-    review: 'review', scanning: 'scan', confirm: 'confirm', results: 'results', settings: 'settings',
+    inbox: 'inbox', review: 'review', scanning: 'scan', confirm: 'confirm', results: 'results', settings: 'settings',
   };
 
   return (

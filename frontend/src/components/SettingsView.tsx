@@ -157,7 +157,7 @@ function ConnectionSection() {
 }
 
 function ScanningSection() {
-  const { state, dispatch } = useStore();
+  const { state, dispatch, startScan, scanRunning } = useStore();
   const setS = (k: keyof typeof state.settings, v: unknown) => dispatch({ type: 'SET_SETTING', key: k, value: v });
   return (
     <div style={{ animation: 'fadeIn .14s ease' }}>
@@ -167,7 +167,10 @@ function ScanningSection() {
           <Sel value={String(state.settings.scanDays)} onChange={v => setS('scanDays', Number(v))} options={[['30','Last 30 days'],['90','Last 90 days'],['180','Last 180 days'],['365','Last 365 days']]} />
         </Row>
         <Row><RowLabel title="Re-scan now" sub="Fetch messages since last scan" />
-          <GhostBtn label="Scan now" onClick={() => dispatch({ type: 'SET_SCREEN', screen: 'scanning' })} />
+          <GhostBtn label="Scan now" onClick={async () => {
+            if (!scanRunning) await startScan().catch(err => alert(String(err)));
+            dispatch({ type: 'SET_SCREEN', screen: 'scanning' });
+          }} />
         </Row>
       </div>
     </div>

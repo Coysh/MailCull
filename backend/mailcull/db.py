@@ -180,6 +180,13 @@ async def get_latest_scan() -> ScanRecord | None:
         return _row_to_scan(row) if row else None
 
 
+async def get_latest_completed_scan() -> ScanRecord | None:
+    async with get_conn() as conn:
+        cur = await conn.execute("SELECT * FROM scans WHERE phase = 'done' ORDER BY id DESC LIMIT 1")
+        row = await cur.fetchone()
+        return _row_to_scan(row) if row else None
+
+
 def _row_to_scan(row: aiosqlite.Row) -> ScanRecord:
     d = dict(row)
     return ScanRecord(
@@ -255,6 +262,37 @@ async def upsert_sender(sender: Sender, scan_id: int) -> None:
 async def bulk_upsert_senders(senders: list[Sender], scan_id: int) -> None:
     async with get_conn() as conn:
         await conn.executemany(_UPSERT_SQL, [_sender_params(s, scan_id) for s in senders])
+        await conn.commit()
+
+
+async def get_senders_by_ids(ids: list[str]) -> dict[str, Sender]:
+    if not ids:
+        return {}
+    async with get_conn() as conn:
+        rows = await conn.execute_fetchall(
+            f"SELECT * FROM senders WHERE id IN ({','.join('?' * len(ids))})", ids,
+        )
+        return {r["id"]: _row_to_sender(r) for r in rows}
+
+
+async def save_message_unsub_methods(sender: Sender) -> None:
+    """
+    Store unsubscribe methods taken from one specific message (inbox view).
+    Existing senders keep their scan stats — only the methods are replaced.
+    Unknown senders are inserted so the action is tracked like any other.
+    """
+    async with get_conn() as conn:
+        cur = await conn.execute(
+            """UPDATE senders SET capability = ?, unsubscribe_links = ?, one_click_url = ?,
+                 mailto_links = ?, http_links = ?, unsubscribe_source = ?, latest_message_id = ?,
+                 latest_ts = MAX(latest_ts, ?), updated_at = datetime('now')
+               WHERE id = ?""",
+            (sender.capability, json.dumps(sender.unsubscribe_links), sender.one_click_url,
+             json.dumps(sender.mailto_links), json.dumps(sender.http_links), sender.unsubscribe_source,
+             sender.latest_message_id, sender.latest_ts, sender.id),
+        )
+        if cur.rowcount == 0:
+            await conn.execute(_UPSERT_SQL, _sender_params(sender, None))  # type: ignore[arg-type]
         await conn.commit()
 
 

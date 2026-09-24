@@ -5,6 +5,7 @@ import { TopBar } from './components/TopBar';
 import { Sidebar } from './components/Sidebar';
 import { OllamaBanner } from './components/OllamaBanner';
 import { ScanView } from './components/ScanView';
+import { InboxView } from './components/InboxView';
 import { ReviewView } from './components/ReviewView';
 import { ConfirmView } from './components/ConfirmView';
 import { ResultsView } from './components/ResultsView';
@@ -25,6 +26,7 @@ export default function App() {
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         <Sidebar />
         <main style={{ flex: 1, overflow: 'hidden', background: '#0E0F12', display: 'flex', flexDirection: 'column' }}>
+          {state.screen === 'inbox'     && <InboxView />}
           {state.screen === 'scanning'  && <ScanView />}
           {state.screen === 'review'    && <ReviewView />}
           {state.screen === 'confirm'   && <ConfirmView />}

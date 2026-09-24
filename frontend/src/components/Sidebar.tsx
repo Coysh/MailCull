@@ -1,6 +1,7 @@
 import React from 'react';
 import { C } from './tokens';
 import { useStore } from '../store';
+import { _timeAgo } from './ScanView';
 import type { Screen } from '../types';
 
 interface NavItem {
@@ -11,7 +12,7 @@ interface NavItem {
 }
 
 export function Sidebar() {
-  const { state, dispatch, decided } = useStore();
+  const { state, dispatch, decided, scanRunning } = useStore();
   const pending = state.senders.filter(s => !s.decision);
 
   const navItem = (id: Screen) => {
@@ -34,6 +35,12 @@ export function Sidebar() {
 
   const navItems = [
     {
+      id: 'inbox' as Screen,
+      label: 'Inbox',
+      icon: (c: string) => <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke={c} strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"><path d="M1.5 8 L3.2 2.5 H10.8 L12.5 8 V11.5 H1.5 Z" /><path d="M1.5 8 H4.6 L5.4 9.4 H8.6 L9.4 8 H12.5" /></svg>,
+      badge: null,
+    },
+    {
       id: 'review' as Screen,
       label: 'Review',
       icon: (c: string) => <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke={c} strokeWidth="1.3" strokeLinecap="round"><line x1="1.5" y1="3" x2="12.5" y2="3" /><line x1="1.5" y1="7" x2="12.5" y2="7" /><line x1="1.5" y1="11" x2="8.5" y2="11" /></svg>,
@@ -45,8 +52,11 @@ export function Sidebar() {
       id: 'scanning' as Screen,
       label: 'Scan',
       icon: (c: string) => <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke={c} strokeWidth="1.3" strokeLinecap="round"><circle cx="6" cy="6" r="4" /><line x1="9" y1="9" x2="12.5" y2="12.5" strokeWidth="1.7" /></svg>,
-      badge: state.screen === 'scanning' ? (
-        <span style={{ width: 6, height: 6, background: C.teal, borderRadius: '50%', animation: 'pulse 1.4s infinite' }} />
+      badge: scanRunning ? (
+        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: C.teal, display: 'flex', alignItems: 'center', gap: 5 }}>
+          <span style={{ width: 6, height: 6, background: C.teal, borderRadius: '50%', animation: 'pulse 1.4s infinite' }} />
+          {state.scanStatus?.progress_pct ?? 0}%
+        </span>
       ) : null,
     },
     {
@@ -110,18 +120,12 @@ export function Sidebar() {
         <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, color: '#3C414B', letterSpacing: '.05em', marginBottom: 4 }}>MAILBOX</div>
         <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: C.textFaint, lineHeight: 1.7 }}>
           {state.senders.length} senders<br />
-          {state.scanStatus ? `${state.scanStatus.total_messages.toLocaleString()} messages` : '—'}<br />
-          {state.scanStatus?.finished_at ? `scanned ${_timeAgo(state.scanStatus.finished_at)}` : '—'}
+          {state.lastCompletedScan ? `${state.lastCompletedScan.total_messages.toLocaleString()} messages` : '—'}<br />
+          {scanRunning ? 'scan in progress…'
+            : state.lastCompletedScan?.finished_at ? `scanned ${_timeAgo(state.lastCompletedScan.finished_at)}`
+            : 'never scanned'}
         </div>
       </div>
     </nav>
   );
-}
-
-function _timeAgo(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime();
-  const h = Math.floor(diff / 3600000);
-  if (h < 1) return 'just now';
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
 }

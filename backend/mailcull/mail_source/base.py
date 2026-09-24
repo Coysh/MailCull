@@ -17,6 +17,7 @@ class RawMessage:
     list_unsubscribe: str | None        # raw header value
     list_unsubscribe_post: str | None   # raw header value
     internal_date_ms: int = 0           # server receive time (reliable ordering)
+    unread: bool = False
 
 
 class MailSource(ABC):
@@ -58,6 +59,14 @@ class MailSource(ABC):
         on_total(n) is awaited once the message count is known, before the first batch.
         Yields before classification so the UI can stream results.
         """
+
+    @abstractmethod
+    async def list_inbox(self, page_token: str | None = None, limit: int = 50) -> tuple[list[RawMessage], str | None]:
+        """Return (inbox messages newest first, next page token)."""
+
+    @abstractmethod
+    async def get_message(self, message_id: str) -> RawMessage | None:
+        """Fetch one message's headers."""
 
     @abstractmethod
     async def find_body_unsubscribe_links(self, message_ids: dict[str, str]) -> dict[str, list[str]]:

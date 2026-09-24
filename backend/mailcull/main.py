@@ -56,12 +56,14 @@ from .api.scan import router as scan_router
 from .api.senders import router as senders_router
 from .api.actions import router as actions_router
 from .api.settings import router as settings_router
+from .api.inbox import router as inbox_router
 
 app.include_router(auth_router)
 app.include_router(scan_router)
 app.include_router(senders_router)
 app.include_router(actions_router)
 app.include_router(settings_router)
+app.include_router(inbox_router)
 
 @app.get("/api/health")
 async def health():

@@ -59,6 +59,11 @@ async def get_latest_scan():
     return await db.get_latest_scan()
 
 
+@router.get("/latest/completed", response_model=ScanRecord | None)
+async def get_latest_completed_scan():
+    return await db.get_latest_completed_scan()
+
+
 async def _find_body_links(scan_id: int, senders: list[Sender]) -> list[Sender]:
     """For senders with no List-Unsubscribe header, look for a link in their newest message body."""
     existing = {s.id: s for s in await db.get_all_senders(capability="body_link")}

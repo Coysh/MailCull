@@ -326,6 +326,29 @@ class GmailApi(MailSource):
         })
         return [p for p in (_parse_message(r) for r in responses.values()) if p]
 
+    # ── Inbox browsing ────────────────────────────────────────────────────────
+
+    async def list_inbox(
+        self, page_token: str | None = None, limit: int = 50,
+    ) -> tuple[list[RawMessage], str | None]:
+        service = await self._build_service()
+        kwargs: dict = {"userId": "me", "labelIds": ["INBOX"], "maxResults": limit}
+        if page_token:
+            kwargs["pageToken"] = page_token
+        resp = await _retry(lambda: service.users().messages().list(**kwargs).execute())
+        ids = [m["id"] for m in resp.get("messages", [])]
+        messages = await asyncio.to_thread(self._fetch_batch, service, ids) if ids else []
+        # Batch responses arrive in any order — show newest first
+        messages.sort(key=lambda m: m.internal_date_ms, reverse=True)
+        return messages, resp.get("nextPageToken")
+
+    async def get_message(self, message_id: str) -> RawMessage | None:
+        service = await self._build_service()
+        resp = await _retry(lambda: service.users().messages().get(
+            userId="me", id=message_id, format="metadata", metadataHeaders=_METADATA_HEADERS,
+        ).execute())
+        return _parse_message(resp)
+
     # ── Body-link discovery ───────────────────────────────────────────────────
 
     async def find_body_unsubscribe_links(
@@ -448,6 +471,7 @@ def _parse_message(msg: dict) -> RawMessage | None:
         list_unsubscribe=headers.get("list-unsubscribe"),
         list_unsubscribe_post=headers.get("list-unsubscribe-post"),
         internal_date_ms=int(msg.get("internalDate") or 0),
+        unread="UNREAD" in (msg.get("labelIds") or []),
     )
 
 
