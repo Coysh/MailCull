@@ -3,53 +3,85 @@ import { C, CAT_COLORS, CAP_COLORS, CAP_LABELS, DEC_LABELS, STATUS_META } from '
 import { useStore } from '../store';
 import type { Sender, Decision } from '../types';
 import * as api from '../api';
+import { parseUtc } from './ScanView';
+
+/** Decision a suggestion maps to. Delete is never bulk-accepted; unsubscribe without a method becomes mute. */
+function acceptable(s: Sender): Decision {
+  if (s.decision || s.status !== 'pending' && s.status !== 'failed' && s.status !== 'still_sending') return null;
+  switch (s.suggested_action) {
+    case 'keep': return 'keep';
+    case 'mute': return 'mute';
+    case 'unsubscribe': return s.capability === 'none' ? 'mute' : 'unsubscribe';
+    default: return null; // 'delete' and anything else: the user decides
+  }
+}
 
 export function ReviewView() {
-  const { state, dispatch, filtered, decided } = useStore();
-
-  const decide = useCallback((id: string, d: Decision) => {
-    dispatch({ type: 'UPDATE_SENDER_DECISION', id, decision: d });
-    api.postDecisions([{ sender_id: id, decision: d }]).catch(console.error);
-  }, [dispatch]);
+  const { state, dispatch, filtered, decided, decide } = useStore();
 
   const bulkDecide = (d: Decision) => {
-    const ids = Array.from(state.selectedIds);
-    dispatch({ type: 'BULK_DECIDE', ids, decision: d });
-    api.postDecisions(ids.map(id => ({ sender_id: id, decision: d }))).catch(console.error);
+    decide(Array.from(state.selectedIds).map(id => ({ id, decision: d })), { clearSelection: true });
   };
+
+  // Rows that survive a decision under the current filters (a Keep disappears from "To do")
+  const staysVisible = useCallback((s: Sender, d: Decision) => {
+    if (d === 'keep' && state.filterStatus === 'active') return false;
+    if (state.filterDecision === 'undecided') return d === null;
+    if (state.filterDecision !== 'all') return d === state.filterDecision;
+    return true;
+  }, [state.filterStatus, state.filterDecision]);
 
   // Keyboard triage
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (state.showShortcuts && e.key === 'Escape') { dispatch({ type: 'TOGGLE_SHORTCUTS' }); return; }
-      if (e.key === '?') { dispatch({ type: 'TOGGLE_SHORTCUTS' }); return; }
-      if (state.screen !== 'review') return;
+      if (state.screen !== 'review' || e.metaKey || e.ctrlKey || e.altKey) return;
       const t = (e.target as HTMLElement).tagName;
-      if (t === 'INPUT' || t === 'SELECT' || t === 'TEXTAREA') return;
+      if (t === 'INPUT' || t === 'SELECT' || t === 'TEXTAREA' || t === 'BUTTON' && e.key === 'Enter') return;
       const cur = filtered[state.focusedIdx];
+      // Toggle the decision, then move on so a run of keystrokes works through the list
+      const set = (d: Decision) => {
+        if (!cur) return;
+        const next = cur.decision === d ? null : d;
+        decide([{ id: cur.id, decision: next }]);
+        if (staysVisible(cur, next)) dispatch({ type: 'SET_FOCUSED', idx: Math.min(state.focusedIdx + 1, filtered.length - 1) });
+      };
       switch (e.key) {
         case 'j': case 'ArrowDown': e.preventDefault(); dispatch({ type: 'SET_FOCUSED', idx: Math.min(state.focusedIdx + 1, filtered.length - 1) }); break;
         case 'k': case 'ArrowUp': e.preventDefault(); dispatch({ type: 'SET_FOCUSED', idx: Math.max(state.focusedIdx - 1, 0) }); break;
         case 'Enter': e.preventDefault(); if (cur) dispatch({ type: 'SET_EXPANDED', id: state.expandedId === cur.id ? null : cur.id }); break;
-        case 'e': if (cur) decide(cur.id, cur.decision === 'keep' ? null : 'keep'); break;
-        case 'u': if (cur) decide(cur.id, cur.decision === 'unsubscribe' ? null : 'unsubscribe'); break;
-        case 'm': if (cur) decide(cur.id, cur.decision === 'mute' ? null : 'mute'); break;
-        case 'a': if (cur) decide(cur.id, cur.decision === 'archive' ? null : 'archive'); break;
-        case 'd': if (cur) decide(cur.id, cur.decision === 'delete' ? null : 'delete'); break;
+        case 'e': set('keep'); break;
+        case 'u': set('unsubscribe'); break;
+        case 'm': set('mute'); break;
+        case 'a': set('archive'); break;
+        case 'd': set('delete'); break;
+        case 't': set('transactional'); break;
+        case 's': set('snooze'); break;
         case 'x': if (cur) dispatch({ type: 'TOGGLE_SELECT', id: cur.id }); break;
         case 'Escape': dispatch({ type: 'SET_EXPANDED', id: null }); break;
       }
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [state.focusedIdx, state.expandedId, state.screen, filtered, decide, dispatch]);
+  }, [state.focusedIdx, state.expandedId, state.screen, filtered, decide, dispatch, staysVisible]);
 
   const stillSending = state.senders.filter(s => s.status === 'still_sending');
-  const muteStillSending = () => {
-    const ids = stillSending.map(s => s.id);
-    dispatch({ type: 'BULK_DECIDE', ids, decision: 'mute' });
-    api.postDecisions(ids.map(id => ({ sender_id: id, decision: 'mute' as Decision }))).catch(console.error);
-  };
+  const muteStillSending = () => decide(stillSending.map(s => ({ id: s.id, decision: 'mute' as Decision })));
+
+  // "Accept suggestions": apply the AI's suggestion to the selection, or else to everything shown
+  const pool = state.selectedIds.size > 0 ? filtered.filter(s => state.selectedIds.has(s.id)) : filtered;
+  const accepts = pool.map(s => ({ id: s.id, decision: acceptable(s) })).filter(i => i.decision !== null);
+  const skippedDeletes = pool.filter(s => !s.decision && s.suggested_action === 'delete').length;
+
+  const onDecide = useCallback((id: string, d: Decision) => decide([{ id, decision: d }]), [decide]);
+
+  // Unsubscribes only get verified by a scan that runs after the grace period; nudge when one is due
+  const lastScanned = state.lastCompletedScan?.finished_at ? parseUtc(state.lastCompletedScan.finished_at).getTime() : 0;
+  const graceMs = state.settings.graceDays * 86_400_000;
+  const verifyDue = state.senders.filter(s => {
+    if (!['unsubscribed', 'unsub_pending'].includes(s.status) || !s.unsubscribed_at) return false;
+    const due = parseUtc(s.unsubscribed_at).getTime() + graceMs;
+    return due < Date.now() && lastScanned < due; // grace has passed and no scan has looked since
+  }).length;
 
   const allSelected = filtered.length > 0 && filtered.every(s => state.selectedIds.has(s.id));
 
@@ -67,7 +99,7 @@ export function ReviewView() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}>
           <span style={{ color: C.textFaint, fontVariantNumeric: 'tabular-nums' }}>{state.senders.length} senders</span>
           <span style={{ color: '#2D3138' }}>/</span>
-          <span style={{ color: C.green, fontVariantNumeric: 'tabular-nums' }}>{decided.length} decided</span>
+          <span style={{ color: C.green, fontVariantNumeric: 'tabular-nums' }}>{decided.length} to confirm</span>
           <span style={{ color: '#2D3138' }}>/</span>
           <span style={{ color: C.textFaint, fontVariantNumeric: 'tabular-nums' }}>{state.senders.filter(s => !s.decision).length} pending</span>
         </div>
@@ -79,6 +111,14 @@ export function ReviewView() {
         <SelectEl value={state.filterDecision} onChange={v => dispatch({ type: 'SET_FILTER_DECISION', v })} options={[['all', 'All decisions'], ['undecided', 'Undecided'], ['keep', 'Keep'], ['unsubscribe', 'Unsubscribe'], ['mute', 'Mute'], ['archive', 'Archive'], ['delete', 'Delete']]} />
 
         <div style={{ flex: 1 }} />
+
+        {accepts.length > 0 && (
+          <button
+            onClick={() => decide(accepts, { clearSelection: true })}
+            title={`Apply the AI's suggested action to ${state.selectedIds.size ? 'the selected rows' : 'every undecided row shown'}. Nothing runs until you Confirm.${skippedDeletes ? ` ${skippedDeletes} "delete" suggestion${skippedDeletes !== 1 ? 's are' : ' is'} skipped: decide those yourself.` : ''}`}
+            style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.textMuted, fontSize: 11, fontWeight: 500, padding: '4px 9px', borderRadius: 2, cursor: 'pointer' }}
+          >Accept suggestions ({accepts.length})</button>
+        )}
 
         {state.selectedIds.size > 0 && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, animation: 'fadeIn .12s ease' }}>
@@ -121,8 +161,19 @@ export function ReviewView() {
         </div>
       )}
 
+      {verifyDue > 0 && stillSending.length === 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, background: C.panel, borderBottom: `1px solid ${C.border}`, padding: '7px 14px', flexShrink: 0 }}>
+          <span style={{ width: 6, height: 6, borderRadius: '50%', background: C.teal }} />
+          <span style={{ fontSize: 12, color: C.textMuted }}>
+            {verifyDue} unsubscribe{verifyDue !== 1 ? 's are' : ' is'} ready to verify. Scan again to see whether {verifyDue !== 1 ? 'those senders have' : 'that sender has'} stopped.
+          </span>
+          <button onClick={() => dispatch({ type: 'SET_SCREEN', screen: 'scanning' })}
+            style={{ marginLeft: 'auto', background: 'transparent', border: `1px solid ${C.border}`, color: C.textMuted, fontSize: 11, padding: '3px 9px', borderRadius: 2, cursor: 'pointer' }}>Go to Scan</button>
+        </div>
+      )}
+
       {/* Table header */}
-      <div style={{ display: 'grid', gridTemplateColumns: '34px minmax(220px,1fr) 66px 78px 86px 108px 108px 96px 224px', alignItems: 'center', height: 30, background: '#101216', borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '34px minmax(220px,1fr) 66px 78px 86px 108px 108px 96px 256px', alignItems: 'center', height: 30, background: '#101216', borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}>
         <div style={{ display: 'flex', justifyContent: 'center' }}>
           <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} aria-label="Select all" style={{ accentColor: C.teal, width: 13, height: 13, cursor: 'pointer' }} />
         </div>
@@ -139,15 +190,17 @@ export function ReviewView() {
       {/* Rows */}
       <div style={{ flex: 1, overflow: 'auto' }}>
         {filtered.map((s, i) => (
-          <SenderRow key={s.id} sender={s} index={i} focused={i === state.focusedIdx} onDecide={decide} />
+          <SenderRow key={s.id} sender={s} index={i} focused={i === state.focusedIdx} onDecide={onDecide} />
         ))}
         {filtered.length === 0 && !state.sendersLoading && (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '60px 20px', gap: 10 }}>
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#31353D" strokeWidth="1.4" strokeLinecap="round"><circle cx="10" cy="10" r="7" /><line x1="15" y1="15" x2="21" y2="21" /></svg>
-            <div style={{ fontSize: 13, color: C.textFaint }}>No senders match this filter</div>
-            <button onClick={() => { dispatch({ type: 'SET_FILTER_CATEGORY', v: 'all' }); dispatch({ type: 'SET_FILTER_CAPABILITY', v: 'all' }); dispatch({ type: 'SET_FILTER_DECISION', v: 'all' }); dispatch({ type: 'SET_FILTER_STATUS', v: 'all' }); }}
-              style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.textMuted, fontSize: 11, padding: '5px 12px', borderRadius: 2, cursor: 'pointer' }}>Clear filters</button>
-          </div>
+          <EmptyState
+            noSenders={state.senders.length === 0}
+            allHandled={state.senders.length > 0 && state.filterStatus === 'active' && state.filterCategory === 'all'
+              && state.filterCapability === 'all' && state.filterDecision === 'all'}
+            handled={state.senders.length}
+            onScan={() => dispatch({ type: 'SET_SCREEN', screen: 'scanning' })}
+            onClear={() => { dispatch({ type: 'SET_FILTER_CATEGORY', v: 'all' }); dispatch({ type: 'SET_FILTER_CAPABILITY', v: 'all' }); dispatch({ type: 'SET_FILTER_DECISION', v: 'all' }); dispatch({ type: 'SET_FILTER_STATUS', v: 'all' }); }}
+          />
         )}
         {state.sendersLoading && filtered.length === 0 && (
           <div style={{ padding: '40px', textAlign: 'center', color: C.textFaint }}>Loading senders…</div>
@@ -157,7 +210,7 @@ export function ReviewView() {
       {/* Keyboard footer */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 13, padding: '5px 14px', background: '#101216', borderTop: `1px solid ${C.border}`, flexShrink: 0 }}>
         <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, letterSpacing: '.08em', color: '#3C414B' }}>KEYS</span>
-        {[['j/k','move'],['↵','expand'],['e','keep'],['u','unsub'],['m','mute'],['a','archive'],['d','delete'],['x','select'],['?','help']].map(([key, label]) => (
+        {[['j/k','move'],['↵','expand'],['e','keep'],['u','unsub'],['m','mute'],['a','archive'],['d','delete'],['t','transactional'],['s','snooze'],['x','select'],['?','help']].map(([key, label]) => (
           <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
             <kbd style={{ fontSize: 10, background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 2, padding: '0 5px', color: C.textMuted }}>{key}</kbd>
             <span style={{ fontSize: 10, color: C.textDim }}>{label}</span>
@@ -170,6 +223,9 @@ export function ReviewView() {
 
 function SenderRow({ sender: s, index, focused, onDecide }: { sender: Sender; index: number; focused: boolean; onDecide: (id: string, d: Decision) => void }) {
   const { state, dispatch } = useStore();
+  const rowRef = React.useRef<HTMLDivElement>(null);
+  // Keep the keyboard-focused row on screen as j/k moves past the viewport edge
+  React.useEffect(() => { if (focused) rowRef.current?.scrollIntoView({ block: 'nearest' }); }, [focused]);
   const selected = state.selectedIds.has(s.id);
   const expanded = s.id === state.expandedId;
 
@@ -180,7 +236,7 @@ function SenderRow({ sender: s, index, focused, onDecide }: { sender: Sender; in
   const rowBorder = focused ? C.teal : selected ? C.tealBorder : 'transparent';
 
   const stopProp = (e: React.MouseEvent) => e.stopPropagation();
-  const toggleExpand = () => dispatch({ type: 'SET_EXPANDED', id: expanded ? null : s.id });
+  const toggleExpand = () => { dispatch({ type: 'SET_FOCUSED', idx: index }); dispatch({ type: 'SET_EXPANDED', id: expanded ? null : s.id }); };
 
   const btn = (action: Decision, label: string) => {
     const active = s.decision === action;
@@ -205,9 +261,9 @@ function SenderRow({ sender: s, index, focused, onDecide }: { sender: Sender; in
   };
 
   return (
-    <div style={{ borderBottom: `1px solid ${C.borderDark}` }}>
+    <div ref={rowRef} style={{ borderBottom: `1px solid ${C.borderDark}` }}>
       <div
-        style={{ display: 'grid', gridTemplateColumns: '34px minmax(220px,1fr) 66px 78px 86px 108px 108px 96px 224px', alignItems: 'center', height: 40, borderLeft: `2px solid ${rowBorder}`, background: rowBg, cursor: 'pointer' }}
+        style={{ display: 'grid', gridTemplateColumns: '34px minmax(220px,1fr) 66px 78px 86px 108px 108px 96px 256px', alignItems: 'center', height: 40, borderLeft: `2px solid ${rowBorder}`, background: rowBg, cursor: 'pointer' }}
         onClick={toggleExpand}
         onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = selected ? '#123028' : '#14181E'; }}
         onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = rowBg; }}
@@ -298,6 +354,7 @@ function ExpandedRow({ sender: s, onDecide }: { sender: Sender; onDecide: (id: s
           <span style={{ height: 1, flex: 1, background: C.borderSub }} />
         </div>
         {s.rationale && <div style={{ fontSize: 12, color: '#8990A0', lineHeight: 1.55, fontStyle: 'italic' }}>"{s.rationale}"</div>}
+        {s.status === 'needs_link' && <ManualStep sender={s} />}
         <div style={{ display: 'flex', gap: 6, marginTop: 13 }}>
           {pill('transactional', 'Mark transactional', C.blue, C.blueBg, '#264a7a')}
           {pill('snooze', `Snooze ${state.settings.snoozeDays}d`, '#C3C8D0', C.panel2, '#3A3F47')}
@@ -347,6 +404,54 @@ function ExpandedRow({ sender: s, onDecide }: { sender: Sender; onDecide: (id: s
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Finish a link unsubscribe by hand: works after a reload, unlike the Results page. */
+function ManualStep({ sender: s }: { sender: Sender }) {
+  const { dispatch, pushToast } = useStore();
+  const [busy, setBusy] = React.useState(false);
+  const link = s.http_links[0] ?? s.unsubscribe_links[0];
+  const markDone = async () => {
+    setBusy(true);
+    try { dispatch({ type: 'UPDATE_SENDER', sender: await api.postManualDone(s.id) }); }
+    catch (err) { pushToast({ tone: 'error', text: `Couldn't mark done: ${String(err).slice(0, 80)}` }); }
+    finally { setBusy(false); }
+  };
+  const b: React.CSSProperties = { background: 'transparent', border: `1px solid ${C.amberBorder}`, color: C.amber, fontSize: 11, padding: '4px 10px', borderRadius: 2, cursor: 'pointer' };
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 13, background: C.amberBg, border: `1px solid ${C.amberBorder}`, borderRadius: 2, padding: '8px 10px' }}>
+      <span style={{ fontSize: 11, color: C.amberDim, flex: 1 }}>Automation couldn't finish this one. Open the page, complete it, then mark it done.</span>
+      {link && <button style={b} onClick={() => window.open(link, '_blank', 'noopener,noreferrer')}>Open page ↗</button>}
+      <button style={b} disabled={busy} onClick={markDone}>{busy ? '…' : 'Mark done'}</button>
+    </div>
+  );
+}
+
+function EmptyState({ noSenders, allHandled, handled, onScan, onClear }: {
+  noSenders: boolean; allHandled: boolean; handled: number; onScan: () => void; onClear: () => void;
+}) {
+  const btn: React.CSSProperties = { background: 'transparent', border: `1px solid ${C.border}`, color: C.textMuted, fontSize: 12, padding: '6px 14px', borderRadius: 2, cursor: 'pointer' };
+  const primary: React.CSSProperties = { ...btn, background: C.tealBg, border: `1px solid ${C.tealBorder}`, color: C.tealBright, fontWeight: 600 };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '60px 20px', gap: 10, textAlign: 'center' }}>
+      {noSenders ? (<>
+        <div style={{ fontSize: 14, fontWeight: 600 }}>No senders yet</div>
+        <div style={{ fontSize: 12, color: C.textFaint, maxWidth: 380, lineHeight: 1.55 }}>
+          Review lists the senders found by a scan. Scanning only reads headers — nothing in Gmail is changed.
+        </div>
+        <button onClick={onScan} style={primary}>Run your first scan →</button>
+      </>) : allHandled ? (<>
+        <div style={{ fontSize: 14, fontWeight: 600 }}>All caught up</div>
+        <div style={{ fontSize: 12, color: C.textFaint, maxWidth: 400, lineHeight: 1.55 }}>
+          Every one of the {handled.toLocaleString()} senders is handled. Scan again in a week or so to check whether anyone you unsubscribed from is still sending.
+        </div>
+        <button onClick={onScan} style={btn}>Go to Scan</button>
+      </>) : (<>
+        <div style={{ fontSize: 13, color: C.textFaint }}>No senders match these filters</div>
+        <button onClick={onClear} style={btn}>Clear filters</button>
+      </>)}
     </div>
   );
 }

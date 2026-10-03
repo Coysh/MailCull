@@ -3,6 +3,8 @@ import { C } from './tokens';
 import { useStore } from '../store';
 import type { SettingsSection } from '../types';
 import * as api from '../api';
+import { InlineConfirm } from './InlineConfirm';
+import { ollamaLocality } from '../util';
 
 const NAV_ITEMS: [SettingsSection, string][] = [
   ['connection', 'Connection'],
@@ -10,7 +12,6 @@ const NAV_ITEMS: [SettingsSection, string][] = [
   ['ai', 'AI · Ollama'],
   ['behaviour', 'Behaviour'],
   ['data', 'Data'],
-  ['appearance', 'Appearance'],
   ['danger', 'Danger zone'],
 ];
 
@@ -48,7 +49,6 @@ export function SettingsView() {
           {sec === 'ai' && <AISection />}
           {sec === 'behaviour' && <BehaviourSection />}
           {sec === 'data' && <DataSection />}
-          {sec === 'appearance' && <AppearanceSection />}
           {sec === 'danger' && <DangerSection />}
         </div>
       </div>
@@ -73,15 +73,6 @@ function Row({ children }: { children: React.ReactNode }) {
   return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: C.panel, border: `1px solid ${C.border}`, borderRadius: 3, padding: '13px 15px' }}>{children}</div>;
 }
 
-function Toggle({ on, onChange, danger }: { on: boolean; onChange: () => void; danger?: boolean }) {
-  const c = danger ? C.amber : C.teal;
-  return (
-    <div onClick={onChange} style={{ width: 34, height: 19, borderRadius: 10, background: on ? c : '#2A2E36', position: 'relative', cursor: 'pointer', transition: 'background .15s', flexShrink: 0 }}>
-      <div style={{ width: 15, height: 15, borderRadius: '50%', background: '#fff', position: 'absolute', top: 2, left: on ? 17 : 2, transition: 'left .15s' }} />
-    </div>
-  );
-}
-
 function Sel({ value, onChange, options }: { value: string; onChange: (v: string) => void; options: [string, string][] }) {
   return (
     <select value={value} onChange={e => onChange(e.target.value)}
@@ -96,15 +87,6 @@ function GhostBtn({ label, onClick }: { label: string; onClick?: () => void }) {
     <button onClick={onClick} style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.textMuted, fontSize: 12, padding: '6px 13px', borderRadius: 2, cursor: 'pointer' }}
       onMouseEnter={e => { const b = e.currentTarget as HTMLButtonElement; b.style.borderColor = C.borderHov; b.style.color = C.text; }}
       onMouseLeave={e => { const b = e.currentTarget as HTMLButtonElement; b.style.borderColor = C.border; b.style.color = C.textMuted; }}
-    >{label}</button>
-  );
-}
-
-function DangerBtn({ label, onClick }: { label: string; onClick?: () => void }) {
-  return (
-    <button onClick={onClick} style={{ background: 'transparent', border: `1px solid ${C.redBorder}`, color: C.redBright, fontSize: 12, padding: '6px 13px', borderRadius: 2, cursor: 'pointer' }}
-      onMouseEnter={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = C.redBg; b.style.borderColor = C.red; }}
-      onMouseLeave={e => { const b = e.currentTarget as HTMLButtonElement; b.style.background = 'transparent'; b.style.borderColor = C.redBorder; }}
     >{label}</button>
   );
 }
@@ -132,7 +114,9 @@ function ConnectionSection() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 13 }}>
           <span style={{ width: 8, height: 8, background: C.green, borderRadius: '50%' }} />
           <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: C.text }}>{account ?? '—'}</span>
-          <span style={{ fontSize: 11, color: C.textFaint, marginLeft: 'auto' }}>Google Workspace</span>
+          <span style={{ fontSize: 11, color: C.textFaint, marginLeft: 'auto' }}>
+            {account && !/@(gmail|googlemail)\.com$/i.test(account) ? 'Google Workspace' : 'Personal Gmail'}
+          </span>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', borderTop: `1px solid ${C.borderSub}` }}>
           {state.authStatus.scopes.map(scope => (
@@ -157,20 +141,16 @@ function ConnectionSection() {
 }
 
 function ScanningSection() {
-  const { state, dispatch, startScan, scanRunning } = useStore();
-  const setS = (k: keyof typeof state.settings, v: unknown) => dispatch({ type: 'SET_SETTING', key: k, value: v });
+  const { state, dispatch, scanRunning, setPref } = useStore();
   return (
     <div style={{ animation: 'fadeIn .14s ease' }}>
       <SectionHeader title="Scanning" subtitle="What MailCull reads, and how far back." />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <Row><RowLabel title="Time window" sub="How far back to scan" />
-          <Sel value={String(state.settings.scanDays)} onChange={v => setS('scanDays', Number(v))} options={[['30','Last 30 days'],['90','Last 90 days'],['180','Last 180 days'],['365','Last 365 days']]} />
+          <Sel value={String(state.settings.scanDays)} onChange={v => setPref('scanDays', Number(v))} options={[['30','Last 30 days'],['90','Last 90 days'],['180','Last 180 days'],['365','Last 365 days']]} />
         </Row>
-        <Row><RowLabel title="Re-scan now" sub="Fetch messages since last scan" />
-          <GhostBtn label="Scan now" onClick={async () => {
-            if (!scanRunning) await startScan().catch(err => alert(String(err)));
-            dispatch({ type: 'SET_SCREEN', screen: 'scanning' });
-          }} />
+        <Row><RowLabel title="Run a scan" sub="Re-reads the whole time window — large mailboxes take a while" />
+          <GhostBtn label={scanRunning ? 'View progress' : 'Go to Scan'} onClick={() => dispatch({ type: 'SET_SCREEN', screen: 'scanning' })} />
         </Row>
       </div>
     </div>
@@ -200,6 +180,18 @@ function AISection() {
             />
             <GhostBtn label="Test" onClick={testConnection} />
           </div>
+          {(() => {
+            const { locality, host } = ollamaLocality(state.settings.ollamaUrl);
+            return locality === 'remote' ? (
+              <div role="note" style={{ display: 'flex', gap: 8, marginTop: 10, background: C.amberBg, border: `1px solid ${C.amberBorder}`, borderRadius: 2, padding: '8px 10px' }}>
+                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, fontWeight: 600, color: C.amber, letterSpacing: '.07em', flexShrink: 0 }}>REMOTE</span>
+                <span style={{ fontSize: 11, color: C.amberDim, lineHeight: 1.5 }}>
+                  {host} is not this machine. Sender names, addresses and sample subjects are sent to it for classification
+                  {state.settings.ollamaUrl.startsWith('http://') ? ', unencrypted (http)' : ''}. Message bodies are never sent.
+                </span>
+              </div>
+            ) : null;
+          })()}
           <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 10 }}>
             <span style={{ width: 6, height: 6, borderRadius: '50%', background: state.ollamaUp ? C.green : C.amber }} />
             <span style={{ fontSize: 11, color: state.ollamaUp ? C.green : C.amber }}>
@@ -217,8 +209,8 @@ function AISection() {
           />
           <div style={{ fontSize: 11, color: C.textFaint, marginTop: 7 }}>Any model pulled in Ollama. Changes apply to the next scan.</div>
         </Card>
-        <Row><RowLabel title="Heuristic fallback" sub="Use rules when Ollama is unreachable" />
-          <Toggle on={state.settings.heuristicFallback} onChange={() => setS('heuristicFallback', !state.settings.heuristicFallback)} />
+        <Row><RowLabel title="Heuristic fallback" sub="If Ollama is unreachable, header rules classify instead so a scan never blocks" />
+          <span style={{ fontSize: 12, color: C.textMuted }}>Always on</span>
         </Row>
       </div>
     </div>
@@ -226,19 +218,21 @@ function AISection() {
 }
 
 function BehaviourSection() {
-  const { state, dispatch } = useStore();
-  const setS = (k: keyof typeof state.settings, v: unknown) => dispatch({ type: 'SET_SETTING', key: k, value: v });
+  const { state, setPref } = useStore();
   return (
     <div style={{ animation: 'fadeIn .14s ease' }}>
-      <SectionHeader title="Behaviour" subtitle="How actions are executed and confirmed." />
+      <SectionHeader title="Behaviour" subtitle="How actions are executed. These are saved." />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        <Row><RowLabel title="Require confirm step" sub="Always show the preview before executing" />
-          <Toggle on={state.settings.confirmStep} onChange={() => setS('confirmStep', !state.settings.confirmStep)} />
+        <Row><RowLabel title="Confirm step" sub="Every batch is previewed before it runs; this can't be turned off" />
+          <span style={{ fontSize: 12, color: C.textMuted }}>Always on</span>
+        </Row>
+        <Row><RowLabel title="Dry run" sub="Set DRY_RUN in .env and restart. Deliberately not switchable from the UI" />
+          <span style={{ fontSize: 12, color: state.dryRun ? C.amber : C.green }}>{state.dryRun ? 'On: actions are simulated' : 'Off: actions are live'}</span>
         </Row>
         <Row><RowLabel title="Mute creates" sub="Gmail filter for future mail" />
-          <Sel value={state.settings.muteAction} onChange={v => setS('muteAction', v)} options={[['archive','Skip inbox (archive)'],['trash','Move to Trash']]} />
+          <Sel value={state.settings.muteAction} onChange={v => setPref('muteAction', v as 'archive' | 'trash')} options={[['archive','Skip inbox (archive)'],['trash','Move to Trash']]} />
         </Row>
-        <Row><RowLabel title="Delete does" sub="Moves existing mail to Trash (Gmail empties it after 30 days)" />
+        <Row><RowLabel title="Delete does" sub="Moves all mail from the sender to Trash (Gmail empties it after 30 days)" />
           <span style={{ fontSize: 12, color: C.textMuted }}>Move to Trash</span>
         </Row>
         <Row><RowLabel title="Unsubscribe pages" sub="Pages that need a click are opened in a hidden browser" />
@@ -247,7 +241,7 @@ function BehaviourSection() {
           </span>
         </Row>
         <Row><RowLabel title="Snooze default" sub="Re-surface snoozed senders after" />
-          <Sel value={String(state.settings.snoozeDays)} onChange={v => setS('snoozeDays', Number(v))} options={[['7','7 days'],['14','14 days'],['30','30 days'],['90','90 days']]} />
+          <Sel value={String(state.settings.snoozeDays)} onChange={v => setPref('snoozeDays', Number(v))} options={[['7','7 days'],['14','14 days'],['30','30 days'],['90','90 days']]} />
         </Row>
       </div>
     </div>
@@ -275,7 +269,7 @@ function DataSection() {
       <Card>
         <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, letterSpacing: '.08em', color: C.textDimmer, marginBottom: 10 }}>DATABASE</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: C.textMuted }}>/data/mailcull.db</span>
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: C.textMuted }}>{state.settings.dbPath || '—'}</span>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <GhostBtn label="Export JSON" onClick={exportJson} />
@@ -286,40 +280,35 @@ function DataSection() {
   );
 }
 
-function AppearanceSection() {
-  return (
-    <div style={{ animation: 'fadeIn .14s ease' }}>
-      <SectionHeader title="Appearance" subtitle="Theme and table density." />
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        <Row><RowLabel title="Theme" sub="Dark is the only console theme for now" />
-          <Sel value="dark" onChange={() => {}} options={[['dark','Dark (console)']]} />
-        </Row>
-        <Row><RowLabel title="Row density" sub="Compact fits more senders per screen" />
-          <Sel value="compact" onChange={() => {}} options={[['compact','Compact'],['comfortable','Comfortable']]} />
-        </Row>
-      </div>
-    </div>
-  );
-}
-
 function DangerSection() {
   const { dispatch, reloadSenders } = useStore();
+  const [error, setError] = React.useState<string | null>(null);
   const wipe = async () => {
-    if (!window.confirm('Delete all local scan data, decisions and the action log? Gmail is not touched.')) return;
-    try { await api.postWipe(); await reloadSenders(); } catch (err) { alert(String(err)); }
+    setError(null);
+    try { await api.postWipe(); await reloadSenders(); } catch (err) { setError(String(err)); }
+  };
+  const disconnect = async () => {
+    setError(null);
+    try { await api.postDisconnect(); dispatch({ type: 'SET_AUTH', status: { connected: false, account: null, scopes: [] } }); }
+    catch (err) { setError(String(err)); }
   };
   return (
     <div style={{ animation: 'fadeIn .14s ease' }}>
       <h2 style={{ fontSize: 15, fontWeight: 600, marginBottom: 3, color: C.redBright }}>Danger zone</h2>
       <p style={{ fontSize: 12, color: C.textFaint, marginBottom: 18 }}>Irreversible. These do not touch already-sent actions.</p>
+      {error && (
+        <div role="alert" style={{ background: C.redBg, border: `1px solid ${C.redBorder}`, color: C.redBright, fontSize: 12, borderRadius: 3, padding: '9px 13px', marginBottom: 10 }}>{error}</div>
+      )}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: C.panel, border: `1px solid ${C.redBorder}`, borderRadius: 3, padding: '13px 15px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, background: C.panel, border: `1px solid ${C.redBorder}`, borderRadius: 3, padding: '13px 15px' }}>
           <RowLabel title="Disconnect account" sub="Revoke OAuth token, clear credentials" />
-          <DangerBtn label="Disconnect" onClick={async () => { await api.postDisconnect(); dispatch({ type: 'SET_AUTH', status: { connected: false, account: null, scopes: [] } }); }} />
+          <InlineConfirm label="Disconnect" confirmLabel="Revoke & disconnect"
+            prompt="This revokes MailCull's Google access. You'll need to sign in again." onConfirm={disconnect} />
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: C.panel, border: `1px solid ${C.redBorder}`, borderRadius: 3, padding: '13px 15px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, background: C.panel, border: `1px solid ${C.redBorder}`, borderRadius: 3, padding: '13px 15px' }}>
           <RowLabel title="Wipe local data" sub="Delete the local database. Gmail is untouched." />
-          <DangerBtn label="Wipe data" onClick={wipe} />
+          <InlineConfirm label="Wipe data" confirmLabel="Wipe everything"
+            prompt="Deletes all scans, decisions and the action log, including undo history. Gmail is not touched." onConfirm={wipe} />
         </div>
       </div>
     </div>

@@ -6,6 +6,18 @@ All notable changes to MailCull are documented here.
 
 ## [Unreleased]
 
+### Safety, first run and history (from the UX/system review)
+- **DRY_RUN can no longer be overridden by a request.** `POST /api/actions/execute` ignores any `dry_run` field, so `DRY_RUN` really is `.env`-only.
+- **Host and Origin checks.** Requests with a non-loopback `Host` header (DNS rebinding) get 400; state-changing requests from another site's `Origin` get 403. Add names with `EXTRA_ALLOWED_HOSTS` if you reach MailCull through a proxy.
+- **Confirm tells the truth.** It shows a DRY RUN banner (and says "Simulate") when dry run is on, and delete/archive show Gmail's estimate of how many messages will really be touched. That's all of the sender's mail, not just the scan window.
+- **Activity page.** Every action, with Undo, now survives a reload (`GET /api/actions/activity`). Link unsubscribes that need a manual step can be finished from the sender's expanded row in Review.
+- **First run.** After connecting with no scan yet, MailCull opens on Scan; Review has a proper empty state. Sidebar order is now Scan, Review, Confirm, Results, with Inbox and Activity under Browse. Sign-in errors say what went wrong, and a missing OAuth client is flagged up front.
+- **Keep is a local mark.** It needs no Confirm step and isn't written to the action log; a toast offers Undo.
+- **Keyboard triage.** The focused row scrolls into view and focus moves on after a decision. New keys: `t` transactional, `s` snooze. `?` works on every screen. Accept suggestions applies the AI's suggestions to the selection or everything shown (never "delete").
+- **Settings are real.** Mute action, snooze days, scan window and Ollama URL/model are saved. Toggles that did nothing were removed. Disconnect and Wipe use an inline two-step confirm instead of `window.confirm`/`alert`.
+- **Privacy honesty.** A remote (non-local) Ollama host is flagged in the header and in Settings; fonts are bundled instead of loaded from Google.
+- A scan prompts you to re-scan once unsubscribes are old enough to verify.
+
 ### Inbox, scan page, favicon
 - **Inbox view.** Lists your inbox newest first, with an unread marker, a filter, and paging for older mail. Each email has **Unsubscribe** and **Mute** buttons, each with a confirm step. Unsubscribe uses *that email's own* unsubscribe link, which is the freshest token available, or looks in the email's body if there's no header. It then runs the full fallback chain. Senders a scan hasn't seen yet are added so the action is tracked.
 - **Scan page no longer auto-starts.** It shows when you last scanned, with message and sender counts, and a time window picker plus **Start scan**. If a scan is already running, the page picks it up instead of starting another. A failed or interrupted scan no longer hides the last completed one.

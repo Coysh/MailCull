@@ -18,16 +18,25 @@ export function ConfirmView() {
   const gDelete = decided.filter(s => s.decision === 'delete');
   const cKeep  = decided.filter(s => s.decision === 'keep').length;
   const cTrans = decided.filter(s => s.decision === 'transactional').length;
-  const delMsgs = gDelete.reduce((a, s) => a + s.message_count, 0);
 
-  // The backend plans each unsubscribe's full fallback chain
-  const unsubKey = gUnsub.map(s => s.id).join(',');
+  // The backend plans each unsubscribe's fallback chain and asks Gmail how many
+  // messages delete/archive will really touch (all time, not just the scan window)
+  const previewIds = [...gUnsub, ...gDelete, ...gArchive].map(s => s.id);
+  const previewKey = previewIds.join(',');
   useEffect(() => {
-    if (!gUnsub.length) return;
-    api.postPreview(gUnsub.map(s => s.id))
+    if (!previewIds.length) return;
+    api.postPreview(previewIds)
       .then(list => setPreviews(Object.fromEntries(list.map(p => [p.sender_id, p]))))
       .catch(console.error);
-  }, [unsubKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [previewKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Estimated all-time count; before the estimate arrives fall back to the scan-window count
+  const msgCount = (s: Sender): { n: number; exact: boolean } => {
+    const est = previews[s.id]?.estimated_messages;
+    return est != null ? { n: est, exact: true } : { n: s.message_count, exact: false };
+  };
+  const delMsgs = gDelete.reduce((a, s) => a + msgCount(s).n, 0);
+  const dryRun = state.dryRun;
 
   const canSend = state.authStatus.scopes.includes(SEND_SCOPE);
   const mailtoBlocked = gUnsub.filter(s => s.mailto_links.length > 0 && !canSend);
@@ -66,10 +75,10 @@ export function ConfirmView() {
   const deleteMode = 'Move to Trash · recoverable 30 days';
   const muteMode = state.settings.muteAction === 'trash' ? 'Move to Trash (future mail)' : 'Skip inbox (archive) · keeps future mail out';
   const destructiveWarning = [
-    gDelete.length ? `${gDelete.length} sender${gDelete.length !== 1 ? 's' : ''} → ${delMsgs.toLocaleString()} messages moved to Trash.` : '',
+    gDelete.length ? `${gDelete.length} sender${gDelete.length !== 1 ? 's' : ''} → ≈${delMsgs.toLocaleString()} messages moved to Trash (all mail from them, not just the scan window).` : '',
     gArchive.length ? `${gArchive.length} sender${gArchive.length !== 1 ? 's' : ''} archived (removable from All Mail).` : '',
     gUnsub.length ? `${gUnsub.length} unsubscribe request${gUnsub.length !== 1 ? 's' : ''} sent.` : '',
-    'These run against the live mailbox immediately.',
+    dryRun ? 'Dry run is on: nothing below will actually be changed.' : 'These run against the live mailbox immediately.',
   ].filter(Boolean).join(' ');
 
   return (
@@ -78,7 +87,7 @@ export function ConfirmView() {
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 6 }}>
           <div>
             <h1 style={{ fontSize: 16, fontWeight: 600, marginBottom: 3 }}>Confirm batch · {decided.length} actions</h1>
-            <div style={{ fontSize: 12, color: C.textFaint }}>Review exactly what runs against the live mailbox before executing.</div>
+            <div style={{ fontSize: 12, color: C.textFaint }}>{dryRun ? 'Review the plan. This is a dry run, so executing only simulates it.' : 'Review exactly what runs against the live mailbox before executing.'}</div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <Btn label="← Back" onClick={() => dispatch({ type: 'SET_SCREEN', screen: 'review' })} disabled={executing} />
@@ -86,7 +95,7 @@ export function ConfirmView() {
               style={{ background: executing ? C.panel2 : C.tealBg, border: `1px solid ${executing ? C.border : C.tealBorder}`, color: executing ? C.textFaint : C.tealBright, fontSize: 12, fontWeight: 600, padding: '7px 15px', borderRadius: 2, cursor: executing ? 'not-allowed' : 'pointer' }}
               onMouseEnter={e => { if (!executing) { const b = e.currentTarget as HTMLButtonElement; b.style.background = C.tealHov; b.style.borderColor = C.teal; } }}
               onMouseLeave={e => { if (!executing) { const b = e.currentTarget as HTMLButtonElement; b.style.background = C.tealBg; b.style.borderColor = C.tealBorder; } }}
-            >{executing ? `Executing ${progress.done} / ${progress.total}…` : `Execute ${decided.length} actions`}</button>
+            >{executing ? `Executing ${progress.done} / ${progress.total}…` : `${dryRun ? 'Simulate' : 'Execute'} ${decided.length} actions`}</button>
           </div>
         </div>
 
@@ -96,6 +105,16 @@ export function ConfirmView() {
               <div style={{ height: '100%', background: C.teal, width: `${progress.total ? (progress.done / progress.total) * 100 : 0}%`, transition: 'width 0.25s ease' }} />
             </div>
             <div style={{ fontSize: 11, color: C.textFaint, marginTop: 5 }}>{progress.done} of {progress.total} complete</div>
+          </div>
+        )}
+
+        {dryRun && (
+          <div role="status" style={{ display: 'flex', alignItems: 'center', gap: 9, background: C.amberBg, border: `1px solid ${C.amberBorder}`, borderRadius: 3, padding: '9px 13px', marginTop: 14 }}>
+            <span style={{ width: 6, height: 6, background: C.amber, borderRadius: '50%', flexShrink: 0 }} />
+            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, fontWeight: 600, color: C.amber, letterSpacing: '.07em' }}>DRY RUN</span>
+            <span style={{ fontSize: 11, color: C.amberDim, lineHeight: 1.5 }}>
+              Executing only simulates these actions and records the plan. Gmail is not touched. Set DRY_RUN=false in .env and restart to go live.
+            </span>
           </div>
         )}
 
@@ -150,7 +169,7 @@ export function ConfirmView() {
                     <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: C.textDim }}>{s.from_address}</span>
                   </div>
                   <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 7px', borderRadius: 2, background: cb, color: cc }}>{s.category}</span>
-                  <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: C.redBright, fontVariantNumeric: 'tabular-nums' }}>{s.message_count.toLocaleString()} → Trash</span>
+                  <span title={msgCount(s).exact ? 'Gmail estimate of all mail from this sender' : 'Scan-window count; estimating…'} style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: C.redBright, fontVariantNumeric: 'tabular-nums' }}>{msgCount(s).exact ? '≈' : ''}{msgCount(s).n.toLocaleString()} → Trash</span>
                 </div>
               );
             })}
@@ -165,7 +184,7 @@ export function ConfirmView() {
                   <span style={{ fontSize: 12, fontWeight: 500 }}>{s.from_name}</span>
                   <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: C.textDim }}>{s.from_address}</span>
                 </div>
-                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: C.cyan, fontVariantNumeric: 'tabular-nums' }}>{s.message_count.toLocaleString()} → All Mail</span>
+                <span title={msgCount(s).exact ? 'Gmail estimate of this sender\'s mail currently in your inbox' : 'Estimating…'} style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: C.cyan, fontVariantNumeric: 'tabular-nums' }}>{msgCount(s).exact ? `≈${msgCount(s).n.toLocaleString()} in inbox` : 'counting…'} → All Mail</span>
               </div>
             ))}
           </GroupBlock>

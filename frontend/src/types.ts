@@ -54,6 +54,8 @@ export interface AuthStatus {
   account: string | null;
   scopes: string[];
   missing_scopes?: string[];
+  /** False when the OAuth client id/secret in .env are unset or placeholders */
+  oauth_configured?: boolean;
 }
 
 export interface ActionPreview {
@@ -65,6 +67,8 @@ export interface ActionPreview {
   description: string;
   can_automate: boolean;
   needs_manual: boolean;
+  /** Delete/archive only: Gmail's estimate of messages touched (all time, not the scan window) */
+  estimated_messages?: number | null;
 }
 
 export interface ActionResult {
@@ -84,7 +88,7 @@ export interface ActionResult {
   skipped: boolean;
 }
 
-export type Screen = 'not_connected' | 'inbox' | 'review' | 'scanning' | 'confirm' | 'results' | 'settings';
+export type Screen = 'not_connected' | 'inbox' | 'review' | 'scanning' | 'confirm' | 'results' | 'activity' | 'settings';
 
 export interface InboxMessage {
   message_id: string;
@@ -103,4 +107,28 @@ export interface InboxMessage {
 }
 
 export interface InboxPage { messages: InboxMessage[]; next_page_token: string | null; }
-export type SettingsSection = 'connection' | 'scanning' | 'ai' | 'behaviour' | 'data' | 'appearance' | 'danger';
+export type SettingsSection = 'connection' | 'scanning' | 'ai' | 'behaviour' | 'data' | 'danger';
+
+/** One row of the persistent action history (GET /actions/activity). */
+export interface ActivityEntry {
+  id: number;
+  sender_id: string;
+  from_name: string;
+  from_address: string;
+  action: string;
+  method: string;
+  result: string;
+  http_status: number | null;
+  dry_run: boolean;
+  can_undo: boolean;
+  undone: boolean;
+  created_at: string;
+}
+
+export interface Toast {
+  id: number;
+  text: string;
+  tone: 'info' | 'error';
+  actionLabel?: string;
+  onAction?: () => void;
+}

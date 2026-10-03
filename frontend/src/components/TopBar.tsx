@@ -2,13 +2,15 @@ import React from 'react';
 import { C } from './tokens';
 import { useStore } from '../store';
 import * as api from '../api';
+import { ollamaLocality } from '../util';
 
 export function TopBar() {
   const { state, dispatch, checkOllama } = useStore();
   const missing = state.authStatus.missing_scopes ?? [];
+  const oll = ollamaLocality(state.settings.ollamaUrl);
 
   const screenLabels: Record<string, string> = {
-    inbox: 'inbox', review: 'review', scanning: 'scan', confirm: 'confirm', results: 'results', settings: 'settings',
+    inbox: 'inbox', review: 'review', scanning: 'scan', confirm: 'confirm', results: 'results', activity: 'activity', settings: 'settings',
   };
 
   return (
@@ -33,7 +35,7 @@ export function TopBar() {
       )}
 
       <button
-        title="Re-check Ollama"
+        title={oll.locality === 'remote' ? `Re-check Ollama — remote host ${oll.host}: sender names and subjects are sent there` : 'Re-check Ollama'}
         onClick={checkOllama}
         style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'transparent', border: `1px solid ${C.border}`, borderRadius: 2, padding: '3px 9px', cursor: 'pointer' }}
         onMouseEnter={e => (e.currentTarget as HTMLButtonElement).style.borderColor = C.borderHov}
@@ -42,6 +44,7 @@ export function TopBar() {
         <span style={{ width: 6, height: 6, borderRadius: '50%', background: state.ollamaUp ? C.green : C.amber }} />
         <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: C.textFaint }}>ollama</span>
         <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: state.ollamaUp ? C.green : C.amber }}>{state.ollamaUp ? 'up' : 'down'}</span>
+        {oll.locality === 'remote' && <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, fontWeight: 600, color: C.amber, letterSpacing: '.06em' }}>REMOTE</span>}
       </button>
 
       {missing.length > 0 && (

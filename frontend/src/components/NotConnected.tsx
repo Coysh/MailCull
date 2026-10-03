@@ -1,17 +1,20 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { C } from './tokens';
 import { useStore } from '../store';
 import * as api from '../api';
 
 export function NotConnected() {
-  const { state, dispatch } = useStore();
+  const { state } = useStore();
+  const [startError, setStartError] = useState<string | null>(null);
+  const configured = state.authStatus.oauth_configured !== false;
 
   const handleConnect = async () => {
+    setStartError(null);
     try {
       const { consent_url } = await api.getAuthStartUrl();
       window.location.href = consent_url;
-    } catch {
-      dispatch({ type: 'SET_AUTH_ERROR', error: true });
+    } catch (err) {
+      setStartError(String(err).replace(/^Error:\s*/, '').replace(/^\d+\s*/, ''));
     }
   };
 
@@ -25,14 +28,16 @@ export function NotConnected() {
         SELF-HOSTED · GMAIL · localhost:8420
       </div>
 
-      {state.authError && (
-        <div style={{ width: 380, display: 'flex', alignItems: 'flex-start', gap: 9, background: C.redBg, border: `1px solid ${C.redBorder}`, borderRadius: 3, padding: '10px 12px', marginBottom: 12, animation: 'fadeIn .14s ease' }}>
+      {(state.authError || startError) && (
+        <div role="alert" style={{ width: 380, display: 'flex', alignItems: 'flex-start', gap: 9, background: C.redBg, border: `1px solid ${C.redBorder}`, borderRadius: 3, padding: '10px 12px', marginBottom: 12, animation: 'fadeIn .14s ease' }}>
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke={C.red} strokeWidth="1.3" strokeLinecap="round" style={{ marginTop: 1, flexShrink: 0 }}>
             <path d="M7 1.8 L12.8 12 L1.2 12 Z" /><line x1="7" y1="5.3" x2="7" y2="8.4" /><circle cx="7" cy="10.2" r=".55" fill={C.red} />
           </svg>
           <div>
-            <div style={{ fontSize: 12, fontWeight: 600, color: C.red, marginBottom: 1 }}>Authorisation failed</div>
-            <div style={{ fontSize: 11, color: C.redText, lineHeight: 1.5 }}>The OAuth token was revoked or expired. Re-authorise to reconnect the mailbox.</div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: C.red, marginBottom: 1 }}>{startError ? "Couldn't start sign-in" : "Google sign-in didn't complete"}</div>
+            <div style={{ fontSize: 11, color: C.redText, lineHeight: 1.5 }}>
+              {startError ?? 'The consent screen may have been cancelled, or the OAuth client in .env is wrong or its redirect URI doesn\'t match. The server log has the exact error. If you changed scopes or revoked access, just sign in again.'}
+            </div>
           </div>
         </div>
       )}
@@ -41,14 +46,24 @@ export function NotConnected() {
         <div style={{ padding: '18px 20px', borderBottom: `1px solid ${C.borderSub}` }}>
           <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 3 }}>Connect your mailbox</div>
           <div style={{ fontSize: 12, color: C.textFaint, lineHeight: 1.55 }}>
-            Authorise read &amp; modify access through the official Gmail API. Classification runs locally via Ollama — no email content leaves this machine.
+            Authorise read &amp; modify access through the official Gmail API. Sender classification runs on your own Ollama — no third-party AI service is used, and message bodies are never sent to it.
           </div>
         </div>
         <div style={{ padding: '18px 20px' }}>
+          {!configured && (
+            <div role="note" style={{ background: C.amberBg, border: `1px solid ${C.amberBorder}`, borderRadius: 2, padding: '10px 11px', marginBottom: 12 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: C.amber, marginBottom: 4 }}>Set up Google OAuth first</div>
+              <div style={{ fontSize: 11, color: C.amberDim, lineHeight: 1.55 }}>
+                Create a Desktop-app OAuth client in Google Cloud, put its ID and secret in <code style={{ fontFamily: "'JetBrains Mono', monospace" }}>.env</code> as
+                {' '}<code style={{ fontFamily: "'JetBrains Mono', monospace" }}>GOOGLE_OAUTH_CLIENT_ID</code> and <code style={{ fontFamily: "'JetBrains Mono', monospace" }}>GOOGLE_OAUTH_CLIENT_SECRET</code>, then restart MailCull.
+              </div>
+            </div>
+          )}
           <button
             onClick={handleConnect}
-            style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, padding: '9px 16px', background: C.tealBg, border: `1px solid ${C.tealBorder}`, borderRadius: 2, color: C.tealBright, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}
-            onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = C.tealHov; (e.currentTarget as HTMLButtonElement).style.borderColor = C.teal; }}
+            disabled={!configured}
+            style={{ opacity: configured ? 1 : 0.45, width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, padding: '9px 16px', background: C.tealBg, border: `1px solid ${C.tealBorder}`, borderRadius: 2, color: C.tealBright, fontSize: 13, fontWeight: 600, cursor: configured ? 'pointer' : 'not-allowed' }}
+            onMouseEnter={e => { if (!configured) return; const b = e.currentTarget as HTMLButtonElement; b.style.background = C.tealHov; b.style.borderColor = C.teal; }}
             onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = C.tealBg; (e.currentTarget as HTMLButtonElement).style.borderColor = C.tealBorder; }}
           >
             <GoogleIcon />
@@ -69,12 +84,12 @@ export function NotConnected() {
                 <svg width="11" height="11" viewBox="0 0 14 14" fill="none" stroke={C.teal} strokeWidth="1.3"><rect x="2.5" y="6" width="9" height="6.5" rx="1" /><path d="M4.5 6 V4.3 a2.5 2.5 0 0 1 5 0 V6" /></svg>
                 <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, letterSpacing: '.08em', color: C.textDimmer }}>LOCAL ONLY</span>
               </div>
-              <div style={{ fontSize: 11, color: C.textFaint, lineHeight: 1.5 }}>Processed on-device. No third-party AI APIs are ever called.</div>
+              <div style={{ fontSize: 11, color: C.textFaint, lineHeight: 1.5 }}>Your Gmail data goes only to Google and your own Ollama. No third-party AI APIs are ever called.</div>
             </div>
           </div>
 
           <div style={{ textAlign: 'center', marginTop: 13 }}>
-            <a href="https://github.com/mailcull/mailcull#oauth-setup" target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: C.textDim, textDecoration: 'none' }}
+            <a href="https://github.com/Coysh/MailCull#google-cloud-oauth-setup" target="_blank" rel="noopener noreferrer" style={{ fontSize: 11, color: C.textDim, textDecoration: 'none' }}
               onMouseEnter={e => (e.currentTarget as HTMLAnchorElement).style.color = C.teal}
               onMouseLeave={e => (e.currentTarget as HTMLAnchorElement).style.color = C.textDim}
             >Setup &amp; OAuth client documentation →</a>

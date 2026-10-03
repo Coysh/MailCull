@@ -12,7 +12,8 @@ from fastapi.staticfiles import StaticFiles
 
 from . import db
 from .config import get_settings
-from .state import init_state
+from .security import LocalOnlyMiddleware
+from .state import get_ollama, init_state
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -25,6 +26,8 @@ async def lifespan(app: FastAPI):
     await db.migrate()
     await db.fail_interrupted_scans()
     init_state()
+    prefs = await db.get_prefs()  # Ollama URL/model chosen in the UI win over .env
+    get_ollama().configure(prefs.get("ollama_base_url"), prefs.get("ollama_model"))
     if settings.app_host != "127.0.0.1":
         logger.warning(
             "APP_HOST is %s — MailCull is designed for localhost only. "
@@ -49,6 +52,13 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+# Added last so it runs first: bad Host / cross-site writes never reach a route
+_cfg = get_settings()
+app.add_middleware(
+    LocalOnlyMiddleware,
+    port=_cfg.app_port,
+    extra_hosts={h.strip() for h in _cfg.extra_allowed_hosts.split(",") if h.strip()},
 )
 
 from .api.auth import router as auth_router

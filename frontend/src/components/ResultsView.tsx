@@ -8,6 +8,7 @@ export function ResultsView() {
   const { state, dispatch, reloadSenders } = useStore();
   const results = state.lastResults;
   const [busy, setBusy] = useState<Set<string>>(new Set());
+  const [error, setError] = useState<string | null>(null);
 
   const ran = results.filter(r => !r.skipped);
   const skipped = results.filter(r => r.skipped);
@@ -32,7 +33,8 @@ export function ResultsView() {
 
   const withBusy = async (id: string, fn: () => Promise<void>) => {
     setBusy(b => new Set(b).add(id));
-    try { await fn(); } catch (err) { console.error(err); alert(String(err)); }
+    setError(null);
+    try { await fn(); } catch (err) { console.error(err); setError(String(err)); }
     finally { setBusy(b => { const n = new Set(b); n.delete(id); return n; }); }
   };
 
@@ -79,6 +81,10 @@ export function ResultsView() {
             onMouseLeave={e => { const b = e.currentTarget as HTMLButtonElement; b.style.borderColor = C.border; b.style.color = C.textMuted; }}
           >Back to review</button>
         </div>
+
+        {error && (
+          <div role="alert" style={{ background: C.redBg, border: `1px solid ${C.redBorder}`, color: C.redBright, fontSize: 12, borderRadius: 3, padding: '9px 13px', marginBottom: 14 }}>{error}</div>
+        )}
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 8, marginBottom: 16 }}>
           {statEntries.map(([key, label]) => {
@@ -193,7 +199,11 @@ export function ResultsView() {
             );
           })}
           {results.length === 0 && (
-            <div style={{ padding: '40px', textAlign: 'center', color: C.textFaint }}>No results yet. Execute a batch from Confirm.</div>
+            <div style={{ padding: '40px', textAlign: 'center', color: C.textFaint, fontSize: 12, lineHeight: 1.7 }}>
+              No batch has run in this session.<br />
+              Past actions, and Undo for them, are in{' '}
+              <button onClick={() => dispatch({ type: 'SET_SCREEN', screen: 'activity' })} style={{ background: 'none', border: 'none', color: C.teal, cursor: 'pointer', font: 'inherit', padding: 0, textDecoration: 'underline' }}>Activity</button>.
+            </div>
           )}
         </div>
       </div>

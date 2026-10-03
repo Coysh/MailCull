@@ -63,8 +63,7 @@ class DecisionItem(BaseModel):
 
 @router.post("/decisions")
 async def set_decisions(items: list[DecisionItem]):
-    for item in items:
-        await db.update_sender_decision(item.sender_id, item.decision)
+    await db.update_sender_decisions([(i.sender_id, i.decision) for i in items])
     return {"updated": len(items)}
 
 

@@ -4,7 +4,7 @@ import { useStore } from '../store';
 import type { ScanStatus } from '../types';
 
 export function ScanView() {
-  const { state, dispatch, startScan, scanRunning } = useStore();
+  const { state, startScan, scanRunning, setPref } = useStore();
   const scan = state.scanStatus;
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
@@ -16,7 +16,7 @@ export function ScanView() {
     finally { setStarting(false); }
   };
 
-  const setDays = (v: string) => dispatch({ type: 'SET_SETTING', key: 'scanDays', value: Number(v) });
+  const setDays = (v: string) => setPref('scanDays', Number(v));
 
   return (
     <div style={{ overflow: 'auto', padding: '22px 24px' }}>

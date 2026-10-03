@@ -96,6 +96,22 @@ class ActionLog(BaseModel):
     created_at: datetime
 
 
+class ActionLogEntry(BaseModel):
+    """An action_log row for the Activity view: no undo payload (it can hold thousands of ids)."""
+    id: int
+    sender_id: str
+    from_name: str
+    from_address: str
+    action: str
+    method: str
+    result: str
+    http_status: int | None = None
+    dry_run: bool
+    can_undo: bool
+    undone: bool = False
+    created_at: datetime
+
+
 class ActionPreview(BaseModel):
     sender_id: str
     from_name: str
@@ -105,6 +121,8 @@ class ActionPreview(BaseModel):
     description: str
     can_automate: bool
     needs_manual: bool
+    # Delete/archive only: Gmail's estimate of how many messages the action will touch
+    estimated_messages: int | None = None
 
 
 class ActionResult(BaseModel):

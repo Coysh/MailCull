@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from typing import Literal
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .. import db
 from ..browser_unsub import browser_installed
@@ -22,21 +23,32 @@ class SettingsResponse(BaseModel):
     browser_unsubscribe: bool
     browser_installed: bool
     unsub_grace_days: int
+    mute_action: Literal["archive", "trash"]
+    snooze_days: int
+    db_path: str
 
 
 class SettingsPatch(BaseModel):
     ollama_base_url: str | None = None
     ollama_model: str | None = None
+    # Persisted preferences (these survive reloads and restarts)
+    mute_action: Literal["archive", "trash"] | None = None
+    snooze_days: int | None = Field(None, ge=1, le=365)
+    scan_since_days: int | None = Field(None, ge=1, le=3650)
 
 
-def _response() -> SettingsResponse:
+async def _response() -> SettingsResponse:
     s = get_settings()
     ollama = get_ollama()
+    prefs = await db.get_prefs()
     return SettingsResponse(
         ollama_base_url=ollama.base_url,
         ollama_model=ollama.model,
         dry_run=s.dry_run,
-        scan_since_days=s.scan_since_days,
+        scan_since_days=int(prefs.get("scan_since_days", s.scan_since_days)),
+        mute_action="trash" if prefs.get("mute_action") == "trash" else "archive",
+        snooze_days=int(prefs.get("snooze_days", 30)),
+        db_path=str(s.db_path),
         body_link_scan=s.body_link_scan,
         browser_unsubscribe=s.browser_unsubscribe,
         browser_installed=browser_installed(),
@@ -46,7 +58,7 @@ def _response() -> SettingsResponse:
 
 @router.get("", response_model=SettingsResponse)
 async def get_settings_endpoint():
-    return _response()
+    return await _response()
 
 
 @router.patch("", response_model=SettingsResponse)
@@ -56,7 +68,11 @@ async def patch_settings(body: SettingsPatch):
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise HTTPException(400, "Ollama URL must be http(s)://host[:port]")
     get_ollama().configure(body.ollama_base_url, body.ollama_model)
-    return _response()
+    prefs = {k: str(v) for k, v in body.model_dump(include={"mute_action", "snooze_days", "scan_since_days", "ollama_base_url", "ollama_model"}).items()
+             if v is not None}
+    if prefs:
+        await db.set_prefs(prefs)
+    return await _response()
 
 
 @router.get("/ollama-status")

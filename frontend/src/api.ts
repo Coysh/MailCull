@@ -1,4 +1,4 @@
-import type { Sender, ScanStatus, AuthStatus, ActionPreview, ActionResult, Decision, InboxPage } from './types';
+import type { Sender, ScanStatus, AuthStatus, ActionPreview, ActionResult, ActivityEntry, Decision, InboxPage } from './types';
 
 const BASE = '/api';
 
@@ -49,18 +49,17 @@ export const postUndo = (action_id: number) =>
   req<{ status: string; detail: string }>(`/actions/${action_id}/undo`, { method: 'POST' });
 export const postManualDone = (sender_id: string) =>
   req<Sender>(`/senders/${sender_id}/manual-done`, { method: 'POST' });
-export const getActionLog = () => req<unknown[]>('/actions/log');
+export const getActivity = (limit = 300) => req<ActivityEntry[]>(`/actions/activity?limit=${limit}`);
 
-// Ollama status
-export const getHealth = () => req<{ status: string; dry_run: boolean; version: string }>('/health');
 
 // Settings
 export interface BackendSettings {
   ollama_base_url: string; ollama_model: string; dry_run: boolean; scan_since_days: number;
   body_link_scan: boolean; browser_unsubscribe: boolean; browser_installed: boolean; unsub_grace_days: number;
+  mute_action: 'archive' | 'trash'; snooze_days: number; db_path: string;
 }
 export const getSettings = () => req<BackendSettings>('/settings');
-export const patchSettings = (patch: Partial<Pick<BackendSettings, 'ollama_base_url' | 'ollama_model'>>) =>
+export const patchSettings = (patch: Partial<Pick<BackendSettings, 'ollama_base_url' | 'ollama_model' | 'mute_action' | 'snooze_days' | 'scan_since_days'>>) =>
   req<BackendSettings>('/settings', { method: 'PATCH', body: JSON.stringify(patch) });
 export const getOllamaStatus = () => req<{ reachable: boolean; base_url: string; model: string }>('/settings/ollama-status');
 export const postWipe = () => req<{ status: string }>('/settings/wipe?confirm=true', { method: 'POST' });

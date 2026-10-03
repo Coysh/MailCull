@@ -175,7 +175,7 @@ class ActionExecutor:
         if self._dry_run:
             return _ok(sender, "archive", "archived", f"DRY RUN: archive inbox mail from {sender.from_address}"), {}, None
         try:
-            ids = await self._list_ids(f"from:{sender.from_address} in:inbox")
+            ids = await self._list_ids(_query_for("archive", sender.from_address))
             if not ids:
                 return _ok(sender, "archive", "archived", "no inbox messages found"), {}, None
             await self._batch_modify(ids, remove=["INBOX"])
@@ -194,7 +194,7 @@ class ActionExecutor:
         if self._dry_run:
             return _ok(sender, "trash", "deleted", f"DRY RUN: trash ~{sender.message_count:,} messages"), {}, None
         try:
-            ids = await self._list_ids(f"from:{sender.from_address}")
+            ids = await self._list_ids(_query_for("delete", sender.from_address))
             if not ids:
                 return _ok(sender, "trash", "deleted", "no messages found"), {}, None
             await self._batch_modify(ids, add=["TRASH"])
@@ -303,6 +303,28 @@ class ActionExecutor:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _query_for(decision: str, address: str) -> str:
+    """The Gmail search each bulk action runs. Shared by execute and the Confirm-screen estimate."""
+    return f"from:{address} in:inbox" if decision == "archive" else f"from:{address}"
+
+
+async def estimate_messages(service: Any, sender: Sender) -> int | None:
+    """Gmail's estimate of how many messages delete/archive would touch (all time, not the scan window)."""
+    if sender.decision not in ("delete", "archive"):
+        return None
+    try:
+        resp = await asyncio.to_thread(
+            service.users().messages().list(
+                userId="me", q=_query_for(sender.decision, sender.from_address),
+                maxResults=1, includeSpamTrash=False,
+            ).execute
+        )
+    except Exception:  # an estimate must never block the Confirm screen
+        logger.warning("Could not estimate message count for %s", sender.from_address, exc_info=True)
+        return None
+    return int(resp.get("resultSizeEstimate", 0))
+
 
 def _plan_action(s: Sender, can_send: bool = True, browser_available: bool = True) -> tuple[str, str, bool, bool]:
     """Return (method, description, can_automate, needs_manual)."""

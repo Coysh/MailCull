@@ -1,5 +1,5 @@
-import React, { createContext, useCallback, useContext, useReducer, useEffect } from 'react';
-import type { Sender, Screen, SettingsSection, ScanStatus, AuthStatus, ActionResult, Decision } from './types';
+import React, { createContext, useCallback, useContext, useReducer, useEffect, useRef } from 'react';
+import type { Sender, Screen, SettingsSection, ScanStatus, AuthStatus, ActionResult, Decision, Toast } from './types';
 import { DONE_STATUSES } from './types';
 import * as api from './api';
 
@@ -29,10 +29,10 @@ interface State {
   /** Most recent scan that finished successfully (may be older than scanStatus) */
   lastCompletedScan: ScanStatus | null;
   lastResults: ActionResult[];
-  needsLinkDoneIds: Set<string>;
+  /** The first-run landing decision (Scan vs Review) has been made */
+  landed: boolean;
+  toasts: Toast[];
   settings: {
-    confirmStep: boolean;
-    heuristicFallback: boolean;
     muteAction: 'archive' | 'trash';
     snoozeDays: number;
     ollamaUrl: string;
@@ -40,8 +40,14 @@ interface State {
     scanDays: number;
     browserInstalled: boolean;
     graceDays: number;
+    dbPath: string;
   };
 }
+
+export interface DecisionItem { id: string; decision: Decision }
+
+type PrefKey = 'muteAction' | 'snoozeDays' | 'scanDays';
+const PREF_FIELD = { muteAction: 'mute_action', snoozeDays: 'snooze_days', scanDays: 'scan_since_days' } as const;
 
 type Action =
   | { type: 'SET_SCREEN'; screen: Screen }
@@ -50,11 +56,14 @@ type Action =
   | { type: 'SET_AUTH_ERROR'; error: boolean }
   | { type: 'SET_SENDERS'; senders: Sender[] }
   | { type: 'SET_SENDERS_LOADING'; loading: boolean }
-  | { type: 'UPDATE_SENDER_DECISION'; id: string; decision: Decision }
+  | { type: 'SET_DECISIONS'; items: DecisionItem[]; clearSelection?: boolean }
+  | { type: 'RESTORE_SENDERS'; senders: Sender[] }
   | { type: 'TOGGLE_SELECT'; id: string }
   | { type: 'SELECT_ALL'; ids: string[] }
   | { type: 'DESELECT_ALL' }
-  | { type: 'BULK_DECIDE'; ids: string[]; decision: Decision }
+  | { type: 'LAND'; hasScan: boolean }
+  | { type: 'ADD_TOAST'; toast: Toast }
+  | { type: 'DISMISS_TOAST'; id: number }
   | { type: 'SET_EXPANDED'; id: string | null }
   | { type: 'SET_FOCUSED'; idx: number }
   | { type: 'SET_FILTER_CATEGORY'; v: string }
@@ -71,7 +80,6 @@ type Action =
   | { type: 'SET_SCAN_STATUS'; status: ScanStatus | null }
   | { type: 'SET_LAST_COMPLETED_SCAN'; status: ScanStatus | null }
   | { type: 'SET_RESULTS'; results: ActionResult[] }
-  | { type: 'TOGGLE_NEEDS_LINK_DONE'; id: string }
   | { type: 'SET_SETTING'; key: keyof State['settings']; value: unknown };
 
 const initialState: State = {
@@ -98,10 +106,10 @@ const initialState: State = {
   scanStatus: null,
   lastCompletedScan: null,
   lastResults: [],
-  needsLinkDoneIds: new Set(),
+  landed: false,
+  toasts: [],
   settings: {
-    confirmStep: true,
-    heuristicFallback: true,
+    dbPath: '',
     muteAction: 'archive',
     snoozeDays: 30,
     ollamaUrl: 'http://localhost:11434',
@@ -112,6 +120,12 @@ const initialState: State = {
   },
 };
 
+/** Mirrors the backend: choosing Keep marks the sender kept; changing or clearing it reopens it. */
+function withDecision(s: Sender, decision: Decision): Sender {
+  const status = decision === 'keep' ? 'kept' : s.status === 'kept' ? 'pending' : s.status;
+  return { ...s, decision, status };
+}
+
 function reducer(state: State, action: Action): State {
   switch (action.type) {
     case 'SET_SCREEN': return { ...state, screen: action.screen };
@@ -120,8 +134,26 @@ function reducer(state: State, action: Action): State {
     case 'SET_AUTH_ERROR': return { ...state, authError: action.error };
     case 'SET_SENDERS': return { ...state, senders: action.senders, sendersLoading: false };
     case 'SET_SENDERS_LOADING': return { ...state, sendersLoading: action.loading };
-    case 'UPDATE_SENDER_DECISION':
-      return { ...state, senders: state.senders.map(s => s.id === action.id ? { ...s, decision: action.decision } : s) };
+    case 'SET_DECISIONS': {
+      const byId = new Map(action.items.map(i => [i.id, i.decision]));
+      return {
+        ...state,
+        senders: state.senders.map(s => byId.has(s.id) ? withDecision(s, byId.get(s.id)!) : s),
+        selectedIds: action.clearSelection ? new Set() : state.selectedIds,
+      };
+    }
+    case 'RESTORE_SENDERS': {
+      const byId = new Map(action.senders.map(s => [s.id, s]));
+      return { ...state, senders: state.senders.map(s => byId.get(s.id) ?? s) };
+    }
+    case 'LAND': {
+      if (state.landed) return state;
+      // First run: nothing to review until a scan has finished, so start on Scan
+      const goScan = !action.hasScan && state.screen === 'review';
+      return { ...state, landed: true, screen: goScan ? 'scanning' : state.screen };
+    }
+    case 'ADD_TOAST': return { ...state, toasts: [...state.toasts.slice(-3), action.toast] };
+    case 'DISMISS_TOAST': return { ...state, toasts: state.toasts.filter(t => t.id !== action.id) };
     case 'TOGGLE_SELECT': {
       const n = new Set(state.selectedIds);
       n.has(action.id) ? n.delete(action.id) : n.add(action.id);
@@ -129,14 +161,6 @@ function reducer(state: State, action: Action): State {
     }
     case 'SELECT_ALL': return { ...state, selectedIds: new Set(action.ids) };
     case 'DESELECT_ALL': return { ...state, selectedIds: new Set() };
-    case 'BULK_DECIDE': {
-      const ids = new Set(action.ids);
-      return {
-        ...state,
-        senders: state.senders.map(s => ids.has(s.id) ? { ...s, decision: action.decision } : s),
-        selectedIds: new Set(),
-      };
-    }
     case 'SET_EXPANDED': return { ...state, expandedId: action.id };
     case 'SET_FOCUSED': return { ...state, focusedIdx: action.idx };
     case 'SET_FILTER_CATEGORY': return { ...state, filterCategory: action.v, focusedIdx: 0 };
@@ -160,11 +184,6 @@ function reducer(state: State, action: Action): State {
       return { ...state, scanStatus: action.status, ...(action.status?.phase === 'done' ? { lastCompletedScan: action.status } : {}) };
     case 'SET_LAST_COMPLETED_SCAN': return { ...state, lastCompletedScan: action.status };
     case 'SET_RESULTS': return { ...state, lastResults: action.results };
-    case 'TOGGLE_NEEDS_LINK_DONE': {
-      const n = new Set(state.needsLinkDoneIds);
-      n.has(action.id) ? n.delete(action.id) : n.add(action.id);
-      return { ...state, needsLinkDoneIds: n };
-    }
     case 'SET_SETTING': return { ...state, settings: { ...state.settings, [action.key]: action.value } };
     default: return state;
   }
@@ -180,6 +199,11 @@ interface Ctx {
   checkOllama: () => void;
   startScan: () => Promise<void>;
   scanRunning: boolean;
+  /** Optimistically set decisions; reverts and toasts if the save fails. */
+  decide: (items: DecisionItem[], opts?: { clearSelection?: boolean; toast?: boolean }) => void;
+  pushToast: (t: Omit<Toast, 'id'>) => void;
+  /** Set a persisted preference (Behaviour / Scanning settings). */
+  setPref: <K extends PrefKey>(key: K, value: State['settings'][K]) => void;
 }
 
 export const isScanRunning = (s: ScanStatus | null) => !!s && s.phase !== 'done' && s.phase !== 'error';
@@ -188,6 +212,9 @@ const StoreCtx = createContext<Ctx>(null!);
 
 export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const toastId = useRef(0);
 
   const filtered = filterAndSort(state);
   const decided = state.senders.filter(s => s.decision && !DONE_STATUSES.has(s.status));
@@ -202,6 +229,36 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const scanRunning = isScanRunning(state.scanStatus);
+
+  const pushToast = useCallback((t: Omit<Toast, 'id'>) => {
+    dispatch({ type: 'ADD_TOAST', toast: { ...t, id: ++toastId.current } });
+  }, []);
+
+  const decide = useCallback<Ctx['decide']>((items, opts = {}) => {
+    if (!items.length) return;
+    const ids = new Set(items.map(i => i.id));
+    const before = stateRef.current.senders.filter(s => ids.has(s.id));
+    dispatch({ type: 'SET_DECISIONS', items, clearSelection: opts.clearSelection });
+    api.postDecisions(items.map(i => ({ sender_id: i.id, decision: i.decision }))).catch(err => {
+      console.error(err);
+      dispatch({ type: 'RESTORE_SENDERS', senders: before });
+      pushToast({ tone: 'error', text: `Couldn't save ${items.length === 1 ? 'that decision' : `${items.length} decisions`} — reverted. ${String(err).slice(0, 80)}` });
+    });
+    // Keep needs no Confirm step, so give a one-click way back
+    if (opts.toast !== false && items.length === 1 && items[0].decision === 'keep' && before[0]) {
+      const { id } = items[0];
+      pushToast({ tone: 'info', text: `Kept ${before[0].from_name}`, actionLabel: 'Undo',
+        onAction: () => decide([{ id, decision: null }], { toast: false }) });
+    }
+  }, [pushToast]);
+
+  const setPref = useCallback<Ctx['setPref']>((key, value) => {
+    dispatch({ type: 'SET_SETTING', key, value });
+    api.patchSettings({ [PREF_FIELD[key]]: value }).catch(err => {
+      console.error(err);
+      pushToast({ tone: 'error', text: `Couldn't save that setting: ${String(err).slice(0, 80)}` });
+    });
+  }, [pushToast]);
 
   const startScan = useCallback(async () => {
     const { scan_id } = await api.postStartScan(state.settings.scanDays);
@@ -230,6 +287,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       dispatch({ type: 'SET_SETTING', key: 'scanDays', value: s.scan_since_days });
       dispatch({ type: 'SET_SETTING', key: 'browserInstalled', value: s.browser_installed && s.browser_unsubscribe });
       dispatch({ type: 'SET_SETTING', key: 'graceDays', value: s.unsub_grace_days });
+      dispatch({ type: 'SET_SETTING', key: 'muteAction', value: s.mute_action });
+      dispatch({ type: 'SET_SETTING', key: 'snoozeDays', value: s.snooze_days });
+      dispatch({ type: 'SET_SETTING', key: 'dbPath', value: s.db_path });
       dispatch({ type: 'SET_DRY_RUN', value: s.dry_run });
     }).catch(() => {});
   }, []);
@@ -251,11 +311,12 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   // Load the most recent scan on connect, and re-attach if one is still running
   useEffect(() => {
     if (!state.authStatus.connected) return;
-    api.getLastCompletedScan().then(done => dispatch({ type: 'SET_LAST_COMPLETED_SCAN', status: done })).catch(() => {});
-    api.getLatestScan().then(latest => {
+    Promise.all([api.getLastCompletedScan(), api.getLatestScan()]).then(([done, latest]) => {
+      dispatch({ type: 'SET_LAST_COMPLETED_SCAN', status: done });
       dispatch({ type: 'SET_SCAN_STATUS', status: latest });
       if (latest && isScanRunning(latest)) dispatch({ type: 'SET_SCAN_ID', id: latest.id });
-    }).catch(() => {});
+      dispatch({ type: 'LAND', hasScan: !!done || (!!latest && isScanRunning(latest)) });
+    }).catch(() => dispatch({ type: 'LAND', hasScan: true }));
   }, [state.authStatus.connected]);
 
   // Poll a running scan from any screen (the sidebar shows its progress)
@@ -271,7 +332,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   }, [state.scanId, scanRunning, reloadSenders]);
 
   return (
-    <StoreCtx.Provider value={{ state, dispatch, filtered, decided, reloadSenders, checkOllama, startScan, scanRunning }}>
+    <StoreCtx.Provider value={{ state, dispatch, filtered, decided, reloadSenders, checkOllama, startScan, scanRunning, decide, pushToast, setPref }}>
       {children}
     </StoreCtx.Provider>
   );

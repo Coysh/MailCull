@@ -73,27 +73,44 @@ export function Sidebar() {
       icon: (c: string) => <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke={c} strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3.2 L3.2 4.4 L5 2.4" /><path d="M2 8.2 L3.2 9.4 L5 7.4" /><line x1="7" y1="3.4" x2="12.5" y2="3.4" /><line x1="7" y1="8.4" x2="12.5" y2="8.4" /></svg>,
       badge: null,
     },
+    {
+      id: 'activity' as Screen,
+      label: 'Activity',
+      icon: (c: string) => <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke={c} strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"><circle cx="7" cy="7" r="5.2" /><path d="M7 4 V7 L9 8.4" /></svg>,
+      badge: null,
+    },
   ];
+
+  const byId = Object.fromEntries(navItems.map(i => [i.id, i])) as Record<string, typeof navItems[number]>;
+  const workflow = ['scanning', 'review', 'confirm', 'results'];
+  const browse = ['inbox', 'activity'];
+
+  const renderItem = (id: string) => {
+    const item = byId[id];
+    const n = navItem(item.id);
+    const active = state.screen === item.id;
+    return (
+      <button key={item.id} onClick={() => goto(item.id)} aria-current={active ? 'page' : undefined} style={{ ...n.style, width: 'calc(100% - 0px)', border: 'none', borderLeft: n.style.borderLeft, font: 'inherit', textAlign: 'left', color: 'inherit' }}
+        onMouseEnter={e => { if (state.screen !== item.id) (e.currentTarget as HTMLButtonElement).style.background = C.panel2; }}
+        onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = state.screen === item.id ? C.tealBg : 'transparent'; }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {item.icon(n.iconColor)}
+          <span style={{ fontSize: 12.5, fontWeight: n.fw, color: n.textColor }}>{item.label}</span>
+        </div>
+        {item.badge}
+      </button>
+    );
+  };
 
   return (
     <nav style={{ width: 186, background: C.panel, borderRight: `1px solid ${C.border}`, display: 'flex', flexDirection: 'column', flexShrink: 0, padding: '7px 0' }}>
       <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, letterSpacing: '.1em', color: '#3C414B', padding: '6px 14px 7px' }}>WORKFLOW</div>
 
-      {navItems.map(item => {
-        const n = navItem(item.id);
-        return (
-          <div key={item.id} onClick={() => goto(item.id)} style={n.style}
-            onMouseEnter={e => { if (state.screen !== item.id) (e.currentTarget as HTMLDivElement).style.background = C.panel2; }}
-            onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = state.screen === item.id ? C.tealBg : 'transparent'; }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              {item.icon(n.iconColor)}
-              <span style={{ fontSize: 12.5, fontWeight: n.fw, color: n.textColor }}>{item.label}</span>
-            </div>
-            {item.badge}
-          </div>
-        );
-      })}
+      {workflow.map(renderItem)}
+
+      <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, letterSpacing: '.1em', color: '#3C414B', padding: '12px 14px 7px' }}>BROWSE</div>
+      {browse.map(renderItem)}
 
       <div style={{ flex: 1 }} />
 
@@ -101,9 +118,9 @@ export function Sidebar() {
         {(() => {
           const n = navItem('settings');
           return (
-            <div onClick={() => goto('settings')} style={n.style}
-              onMouseEnter={e => { if (state.screen !== 'settings') (e.currentTarget as HTMLDivElement).style.background = C.panel2; }}
-              onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = state.screen === 'settings' ? C.tealBg : 'transparent'; }}
+            <button onClick={() => goto('settings')} aria-current={state.screen === 'settings' ? 'page' : undefined} style={{ ...n.style, width: '100%', border: 'none', borderLeft: n.style.borderLeft, font: 'inherit', textAlign: 'left', color: 'inherit' }}
+              onMouseEnter={e => { if (state.screen !== 'settings') (e.currentTarget as HTMLButtonElement).style.background = C.panel2; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = state.screen === 'settings' ? C.tealBg : 'transparent'; }}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke={n.iconColor} strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
@@ -111,7 +128,7 @@ export function Sidebar() {
                 </svg>
                 <span style={{ fontSize: 12.5, fontWeight: n.fw, color: n.textColor }}>Settings</span>
               </div>
-            </div>
+            </button>
           );
         })()}
       </div>

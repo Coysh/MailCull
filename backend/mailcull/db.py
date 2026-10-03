@@ -9,7 +9,7 @@ from typing import AsyncIterator
 
 import aiosqlite
 
-from .models import ActionLog, Decision, Sender, ScanRecord
+from .models import ActionLog, ActionLogEntry, Decision, Sender, ScanRecord
 
 _db_path: Path | None = None
 
@@ -67,7 +67,13 @@ async def migrate() -> None:
             updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
+        CREATE TABLE IF NOT EXISTS prefs (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_senders_domain ON senders(domain);
+        CREATE INDEX IF NOT EXISTS idx_senders_status ON senders(status);
         CREATE INDEX IF NOT EXISTS idx_senders_decision ON senders(decision);
 
         CREATE TABLE IF NOT EXISTS action_log (
@@ -117,6 +123,22 @@ async def migrate() -> None:
                    WHERE a.sender_id = senders.id AND a.action = 'unsubscribe' AND a.dry_run = 0
                    ORDER BY a.id LIMIT 1))
                WHERE status = 'unsubscribed' AND unsubscribed_at IS NULL"""
+        )
+        await conn.commit()
+
+
+async def get_prefs() -> dict[str, str]:
+    """User preferences set in the UI (Behaviour / Scanning). .env supplies the defaults."""
+    async with get_conn() as conn:
+        rows = await conn.execute_fetchall("SELECT key, value FROM prefs")
+    return {r["key"]: r["value"] for r in rows}
+
+
+async def set_prefs(values: dict[str, str]) -> None:
+    async with get_conn() as conn:
+        await conn.executemany(
+            "INSERT INTO prefs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            list(values.items()),
         )
         await conn.commit()
 
@@ -355,12 +377,21 @@ async def get_sender(sender_id: str) -> Sender | None:
         return _row_to_sender(row) if row else None
 
 
+# Keep is a local mark, not an action: it needs no Confirm step and leaves no action-log row.
+# Choosing it marks the sender 'kept'; changing or clearing the decision reopens it.
+_DECISION_SQL = """UPDATE senders SET decision = ?,
+     status = CASE WHEN ? = 'keep' THEN 'kept' WHEN status = 'kept' THEN 'pending' ELSE status END,
+     updated_at = datetime('now') WHERE id = ?"""
+
+
 async def update_sender_decision(sender_id: str, decision: Decision) -> None:
+    await update_sender_decisions([(sender_id, decision)])
+
+
+async def update_sender_decisions(items: list[tuple[str, Decision]]) -> None:
+    """Set many decisions in one connection and transaction."""
     async with get_conn() as conn:
-        await conn.execute(
-            "UPDATE senders SET decision = ?, updated_at = datetime('now') WHERE id = ?",
-            (decision, sender_id),
-        )
+        await conn.executemany(_DECISION_SQL, [(d, d, sid) for sid, d in items])
         await conn.commit()
 
 
@@ -487,6 +518,30 @@ async def get_action_log(limit: int = 500) -> list[ActionLog]:
             "SELECT * FROM action_log ORDER BY id DESC LIMIT ?", (limit,)
         )
         return [_row_to_action(r) for r in rows]
+
+
+async def get_activity(limit: int = 300) -> list[ActionLogEntry]:
+    """Newest-first action history with the sender's name; survives reloads, unlike the Results page."""
+    async with get_conn() as conn:
+        rows = await conn.execute_fetchall(
+            """SELECT a.id, a.sender_id, a.action, a.method, a.result, a.http_status, a.dry_run,
+                      a.undone, a.created_at, (a.undo_data IS NOT NULL) AS has_undo,
+                      COALESCE(s.from_name, a.sender_id) AS from_name,
+                      COALESCE(s.from_address, a.sender_id) AS from_address
+               FROM action_log a LEFT JOIN senders s ON s.id = a.sender_id
+               ORDER BY a.id DESC LIMIT ?""",
+            (limit,),
+        )
+    return [
+        ActionLogEntry(
+            id=r["id"], sender_id=r["sender_id"], from_name=r["from_name"], from_address=r["from_address"],
+            action=r["action"], method=r["method"], result=r["result"], http_status=r["http_status"],
+            dry_run=bool(r["dry_run"]), undone=bool(r["undone"]),
+            can_undo=bool(r["has_undo"]) and not r["undone"] and not r["dry_run"],
+            created_at=datetime.fromisoformat(r["created_at"]),
+        )
+        for r in rows
+    ]
 
 
 def _row_to_action(r: aiosqlite.Row) -> ActionLog:

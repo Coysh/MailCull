@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     db_path: Path = Path("/data/mailcull.db")
     app_port: int = 8420
     app_host: str = "127.0.0.1"
+    # Extra Host header names to accept (comma-separated), e.g. a reverse-proxy name.
+    # localhost / 127.0.0.1 / ::1 are always allowed.
+    extra_allowed_hosts: str = ""
 
     # Gmail scopes requested during OAuth
     gmail_scopes: list[str] = [

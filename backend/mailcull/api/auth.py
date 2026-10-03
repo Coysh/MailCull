@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
@@ -29,10 +29,20 @@ class AuthStatusResponse(BaseModel):
     scopes: list[str] = []
     # Requested by this version but not granted by the stored token (re-authorise to fix)
     missing_scopes: list[str] = []
+    # False when GOOGLE_OAUTH_CLIENT_ID/SECRET are unset or still the .env.example placeholders
+    oauth_configured: bool = True
+
+
+def _oauth_configured() -> bool:
+    s = get_settings()
+    return bool(s.google_oauth_client_id and s.google_oauth_client_secret) \
+        and not s.google_oauth_client_id.startswith("YOUR_")
 
 
 @router.get("/start", response_model=AuthStartResponse)
 async def auth_start(request: Request):
+    if not _oauth_configured():
+        raise HTTPException(400, "GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET are not set in .env")
     gmail = get_gmail()
     url = await gmail.authenticate(_redirect_uri(request))
     return AuthStartResponse(consent_url=url)
@@ -58,7 +68,7 @@ async def auth_status():
     gmail = get_gmail()
     connected = await gmail.is_connected()
     if not connected:
-        return AuthStatusResponse(connected=False)
+        return AuthStatusResponse(connected=False, oauth_configured=_oauth_configured())
     account = await gmail.get_account_email()
     scopes = await gmail.get_granted_scopes()
     missing = [s for s in gmail.requested_scopes if s not in scopes]

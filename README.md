@@ -303,6 +303,7 @@ For GPU support, uncomment the `deploy.resources` block in `docker-compose.yml` 
 | `BODY_LINK_SCAN` | `true` | During scans, look in the newest message body for an unsubscribe link when there's no header |
 | `BROWSER_UNSUBSCRIBE` | `true` | Use a headless browser (Playwright/Chromium) for unsubscribe pages that need a click |
 | `UNSUB_GRACE_DAYS` | `7` | Mail arriving this many days after unsubscribing flags the sender **Still sending** |
+| `EXTRA_ALLOWED_HOSTS` | *(empty)* | Comma-separated extra `Host` names to accept (e.g. a reverse-proxy name). `localhost`, `127.0.0.1` and `::1` are always allowed |
 
 ---
 
@@ -401,7 +402,7 @@ mailcull/
 
 **Human-in-the-loop is enforced at the API layer**: `POST /api/actions/execute` requires `confirm: true` in the body. The LLM result (`suggested_action`) is stored separately from the user decision (`decision`) — the LLM never triggers an action.
 
-**DRY_RUN is `.env`-only**: Dry run is configured in `.env` and read by the backend at startup. There is no in-app toggle — this is intentional to prevent accidental disabling mid-session. The TopBar shows a persistent `DRY RUN` badge when active. Every write path in `ActionExecutor` checks `self._dry_run` before making any Gmail API call and returns a synthetic success result that is logged identically to a real result.
+**DRY_RUN is `.env`-only**: Dry run is configured in `.env` and read by the backend at startup. There is no in-app toggle, and `/api/actions/execute` ignores any `dry_run` in the request body. This is intentional to prevent accidental disabling mid-session. The TopBar shows a persistent `DRY RUN` badge when active. Every write path in `ActionExecutor` checks `self._dry_run` before making any Gmail API call and returns a synthetic success result that is logged identically to a real result.
 
 ---
 
@@ -423,10 +424,11 @@ mailcull/
 | `POST` | `/api/senders/{id}/manual-done` | Record a manually completed link unsubscribe |
 | `POST` | `/api/senders/classify` | Re-run LLM classification on all (or specified) senders |
 | `POST` | `/api/senders/decisions` | Set user decisions: `[{sender_id, decision}]` |
-| `POST` | `/api/actions/preview` | Per-sender plan for a given sender list — side-effect free |
+| `POST` | `/api/actions/preview` | Per-sender plan for a given sender list. Side-effect free; delete/archive include Gmail's `estimated_messages` |
 | `POST` | `/api/actions/execute` | Execute actions; requires `confirm: true`; respects `DRY_RUN`; skips handled senders unless `force: true` |
 | `POST` | `/api/actions/{id}/undo` | Undo a mute, archive, delete or transactional label |
-| `GET` | `/api/actions/log` | Full action log |
+| `GET` | `/api/actions/activity` | Persistent history for the Activity page, with `can_undo` per entry |
+| `GET` | `/api/actions/log` | Raw action log |
 | `GET` | `/api/settings/ollama-status` | Server-side Ollama reachability check |
 | `POST` | `/api/settings/wipe?confirm=true` | Delete local scans, senders and action log (Gmail untouched) |
 | `GET` | `/api/health` | `{status, dry_run, version}` |
